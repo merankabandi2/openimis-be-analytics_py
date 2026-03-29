@@ -1,0 +1,235 @@
+import json
+import time
+import graphene
+from django.db.models import Q
+from graphene_django import DjangoObjectType
+from django.core.exceptions import PermissionDenied
+
+from core import ExtendedConnection
+from core.schema import OrderedDjangoFilterConnectionField
+
+from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, AnalyticsExport
+from .services import QueryBuilderService, ExportService
+
+
+class AnalyticsQueryType(DjangoObjectType):
+    class Meta:
+        model = AnalyticsQuery
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'name': ['exact', 'icontains'],
+            'entity_type': ['exact'],
+            'is_public': ['exact'],
+        }
+        connection_class = ExtendedConnection
+
+
+class AnalyticsDashboardType(DjangoObjectType):
+    class Meta:
+        model = AnalyticsDashboard
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'name': ['exact', 'icontains'],
+            'is_public': ['exact'],
+            'is_default': ['exact'],
+        }
+        connection_class = ExtendedConnection
+
+
+class AnalyticsWidgetType(DjangoObjectType):
+    class Meta:
+        model = AnalyticsWidget
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {}
+        connection_class = ExtendedConnection
+
+
+class AnalyticsExportType(DjangoObjectType):
+    class Meta:
+        model = AnalyticsExport
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'export_format': ['exact'],
+        }
+        connection_class = ExtendedConnection
+
+
+class EntityFieldType(graphene.ObjectType):
+    name = graphene.String()
+    type = graphene.String()
+    label = graphene.String()
+    filterable = graphene.Boolean()
+    aggregatable = graphene.Boolean()
+
+
+class QueryResultType(graphene.ObjectType):
+    data = graphene.JSONString()
+    row_count = graphene.Int()
+    execution_time = graphene.Float()
+
+
+class Query(graphene.ObjectType):
+    analytics_queries = OrderedDjangoFilterConnectionField(
+        AnalyticsQueryType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+    analytics_query = graphene.Field(AnalyticsQueryType, id=graphene.ID())
+
+    analytics_dashboards = OrderedDjangoFilterConnectionField(
+        AnalyticsDashboardType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+    analytics_dashboard = graphene.Field(AnalyticsDashboardType, id=graphene.ID())
+
+    execute_analytics_query = graphene.Field(
+        QueryResultType,
+        entity_type=graphene.String(required=True),
+        query_config=graphene.JSONString(required=True),
+    )
+
+    analytics_entity_fields = graphene.List(
+        EntityFieldType,
+        entity_type=graphene.String(required=True),
+    )
+
+    analytics_exports = OrderedDjangoFilterConnectionField(
+        AnalyticsExportType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+
+    def resolve_analytics_queries(self, info, **kwargs):
+        qs = AnalyticsQuery.objects.filter(validity_to__isnull=True)
+        if not info.context.user.is_superuser:
+            qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
+        return qs
+
+    def resolve_analytics_query(self, info, id):
+        return AnalyticsQuery.objects.get(pk=id)
+
+    def resolve_analytics_dashboards(self, info, **kwargs):
+        qs = AnalyticsDashboard.objects.filter(validity_to__isnull=True)
+        if not info.context.user.is_superuser:
+            qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
+        return qs
+
+    def resolve_analytics_dashboard(self, info, id):
+        return AnalyticsDashboard.objects.get(pk=id)
+
+    def resolve_execute_analytics_query(self, info, entity_type, query_config):
+        start = time.time()
+        config = json.loads(query_config) if isinstance(query_config, str) else query_config
+        results = QueryBuilderService.execute_query(entity_type, config)
+        return QueryResultType(
+            data=results,
+            row_count=len(results),
+            execution_time=time.time() - start,
+        )
+
+    def resolve_analytics_entity_fields(self, info, entity_type):
+        fields = QueryBuilderService.get_entity_fields(entity_type)
+        return [EntityFieldType(**f) for f in fields]
+
+    def resolve_analytics_exports(self, info, **kwargs):
+        qs = AnalyticsExport.objects.all()
+        if not info.context.user.is_superuser:
+            qs = qs.filter(exported_by=info.context.user)
+        return qs
+
+
+# ── Mutations ─────────────────────────────────────────────────────
+
+class AnalyticsQueryInput(graphene.InputObjectType):
+    name = graphene.String(required=True)
+    description = graphene.String()
+    entity_type = graphene.String(required=True)
+    query_config = graphene.JSONString(required=True)
+    is_public = graphene.Boolean()
+
+
+class CreateAnalyticsQueryMutation(graphene.Mutation):
+    class Arguments:
+        input = AnalyticsQueryInput(required=True)
+
+    query = graphene.Field(AnalyticsQueryType)
+
+    def mutate(self, info, input):
+        obj = AnalyticsQuery.objects.create(
+            name=input.name,
+            description=input.description,
+            entity_type=input.entity_type,
+            query_config=json.loads(input.query_config) if isinstance(input.query_config, str) else input.query_config,
+            is_public=input.is_public or False,
+            created_by=info.context.user,
+        )
+        return CreateAnalyticsQueryMutation(query=obj)
+
+
+class UpdateAnalyticsQueryMutation(graphene.Mutation):
+    class Arguments:
+        id = graphene.ID(required=True)
+        input = AnalyticsQueryInput(required=True)
+
+    query = graphene.Field(AnalyticsQueryType)
+
+    def mutate(self, info, id, input):
+        obj = AnalyticsQuery.objects.get(pk=id)
+        if obj.created_by != info.context.user and not info.context.user.is_superuser:
+            raise PermissionDenied("You can only edit your own queries")
+        obj.name = input.name
+        obj.description = input.description
+        obj.entity_type = input.entity_type
+        obj.query_config = json.loads(input.query_config) if isinstance(input.query_config, str) else input.query_config
+        if input.is_public is not None:
+            obj.is_public = input.is_public
+        obj.save()
+        return UpdateAnalyticsQueryMutation(query=obj)
+
+
+class ExportAnalyticsDataMutation(graphene.Mutation):
+    class Arguments:
+        entity_type = graphene.String(required=True)
+        query_config = graphene.JSONString(required=True)
+        export_format = graphene.String(required=True)
+        query_id = graphene.ID()
+
+    export_url = graphene.String()
+    export_id = graphene.ID()
+
+    def mutate(self, info, entity_type, query_config, export_format, query_id=None):
+        from datetime import datetime
+        from analytics.apps import AnalyticsConfig
+
+        config = json.loads(query_config) if isinstance(query_config, str) else query_config
+        results = QueryBuilderService.execute_query(entity_type, config)
+
+        if len(results) > AnalyticsConfig.analytics_max_export_rows:
+            raise Exception(f"Export exceeds maximum rows ({AnalyticsConfig.analytics_max_export_rows})")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"analytics_{entity_type}_{timestamp}"
+
+        if export_format == 'excel':
+            filepath = ExportService.export_to_excel(results, filename)
+        elif export_format == 'csv':
+            filepath = ExportService.export_to_csv(results, filename)
+        else:
+            raise ValueError(f"Unsupported format: {export_format}")
+
+        record = AnalyticsExport.objects.create(
+            query_id=query_id,
+            export_format=export_format,
+            filters_applied=config,
+            row_count=len(results),
+            file_path=filepath,
+            exported_by=info.context.user,
+        )
+        return ExportAnalyticsDataMutation(
+            export_url=f"/api/analytics/download/{record.id}/",
+            export_id=record.id,
+        )
+
+
+class Mutation(graphene.ObjectType):
+    create_analytics_query = CreateAnalyticsQueryMutation.Field()
+    update_analytics_query = UpdateAnalyticsQueryMutation.Field()
+    export_analytics_data = ExportAnalyticsDataMutation.Field()

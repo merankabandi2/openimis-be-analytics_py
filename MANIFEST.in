@@ -1,0 +1,6 @@
+include LICENSE.md
+include README.md
+recursive-include analytics *
+recursive-exclude analytics __pycache__
+recursive-exclude analytics *.pyc
+recursive-exclude analytics *.pyo
