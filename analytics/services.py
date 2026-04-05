@@ -104,6 +104,8 @@ class QueryBuilderService:
         if order_by:
             queryset = queryset.order_by(*order_by)
         limit = query_config.get('limit', 1000)
+        if not group_by and not aggregations:
+            return list(queryset.values()[:limit])
         return list(queryset[:limit])
 
     @classmethod

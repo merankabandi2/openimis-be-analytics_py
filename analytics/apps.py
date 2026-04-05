@@ -33,6 +33,11 @@ class AnalyticsConfig(AppConfig):
         from core.models import ModuleConfiguration
         cfg = ModuleConfiguration.get_or_default(MODULE_NAME, DEFAULT_CFG)
         self.__load_config(cfg)
+        try:
+            from analytics.services import DashboardService
+            DashboardService.create_default_dashboards()
+        except Exception:
+            pass  # Ignore on startup if DB not ready
 
     @classmethod
     def __load_config(cls, cfg):
