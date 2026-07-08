@@ -78,7 +78,8 @@ class Command(BaseCommand):
         created_queries = 0
         created_widgets = 0
 
-        # Seed queries
+        # Seed queries — also update existing rows so seed-driven config changes
+        # (e.g. UI compat fixes) propagate without manual DB cleanup.
         query_map = {}
         for q_def in DEFAULT_QUERIES:
             q, was_created = AnalyticsQuery.objects.get_or_create(
@@ -93,6 +94,21 @@ class Command(BaseCommand):
             query_map[q_def['name']] = q
             if was_created:
                 created_queries += 1
+            else:
+                # Refresh the canonical config/entity_type on reseed in case the
+                # schema evolved (dimensions→group_by, measures→aggregations, …).
+                changed = False
+                if q.entity_type != q_def['entity_type']:
+                    q.entity_type = q_def['entity_type']
+                    changed = True
+                if q.query_config != q_def['query_config']:
+                    q.query_config = q_def['query_config']
+                    changed = True
+                if not q.is_public:
+                    q.is_public = True
+                    changed = True
+                if changed:
+                    q.save(update_fields=['entity_type', 'query_config', 'is_public'])
 
         # Seed dashboard
         dash, dash_created = AnalyticsDashboard.objects.get_or_create(

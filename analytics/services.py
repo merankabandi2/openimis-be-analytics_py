@@ -53,17 +53,24 @@ class QueryBuilderService:
         from individual.models import Individual, Group, GroupIndividual
         from social_protection.models import Beneficiary, GroupBeneficiary
         from grievance_social_protection.models import Ticket
+        from payroll.models import BenefitConsumption
         models = {
             'individual': Individual,
             'group': Group,
             'beneficiary': Beneficiary,
             'group_beneficiary': GroupBeneficiary,
             'grievance': Ticket,
+            # The Merankabandi model maps "payment" to BenefitConsumption rows
+            # (each bi-monthly disbursement to a beneficiary).
+            'payment': BenefitConsumption,
         }
         return models.get(entity_type)
 
     @classmethod
     def _execute_orm_query(cls, entity_type: str, query_config: Dict) -> List[Dict]:
+        import datetime
+        import decimal
+        import uuid as uuid_mod
         from django.db.models import Q, Count, Sum, Avg, Min, Max
         agg_funcs = {'count': Count, 'sum': Sum, 'avg': Avg, 'min': Min, 'max': Max}
 
@@ -73,9 +80,24 @@ class QueryBuilderService:
 
         queryset = model.objects.all()
 
-        # Filters
+        # Filters — accept either dict form ({field: {operator, value}}) or list form
+        # ([{field, operator, value}]) for compatibility with FE builder state.
+        filters_cfg = query_config.get('filters', {})
         filter_q = Q()
-        for field, condition in query_config.get('filters', {}).items():
+        if isinstance(filters_cfg, dict):
+            iterable = filters_cfg.items()
+        elif isinstance(filters_cfg, list):
+            iterable = [
+                (f.get('field'), {'operator': f.get('operator', 'exact'), 'value': f.get('value')})
+                for f in filters_cfg
+                if isinstance(f, dict) and f.get('field')
+            ]
+        else:
+            iterable = []
+
+        for field, condition in iterable:
+            if not field:
+                continue
             if isinstance(condition, dict):
                 op = condition.get('operator', 'exact')
                 val = condition.get('value')
@@ -89,9 +111,36 @@ class QueryBuilderService:
                 filter_q &= Q(**{field: condition})
         queryset = queryset.filter(filter_q)
 
-        # Group by + aggregations
-        group_by = query_config.get('group_by', [])
-        aggregations = query_config.get('aggregations', {})
+        # Group by + aggregations — accept either `group_by`/`aggregations` (UI builder)
+        # or `dimensions`/`measures` (seeded queries).
+        group_by = query_config.get('group_by') or query_config.get('dimensions') or []
+        # Guard against the legacy shape where a single group-by field is stored as a bare
+        # string (e.g. `"group_by": "status"`). Without this coercion the `*group_by` splat
+        # below iterates character-by-character and crashes in Django's `values()`.
+        if isinstance(group_by, str):
+            group_by = [group_by] if group_by else []
+        aggregations = query_config.get('aggregations') or {}
+
+        # Normalise shorthand measures=["count"] into a proper aggregations map.
+        measures = query_config.get('measures')
+        if measures and not aggregations:
+            measure_map = {}
+            for m in measures:
+                if isinstance(m, str):
+                    measure_map[f'{m}_value'] = {'function': m, 'field': 'id'}
+                elif isinstance(m, dict) and m.get('function'):
+                    name = m.get('name') or f"{m['function']}_{m.get('field', 'id')}"
+                    measure_map[name] = {'function': m['function'], 'field': m.get('field', 'id')}
+            aggregations = measure_map
+
+        # Accept aggregations as either dict ({name: {function, field}}) or list ([{name, function, field}]).
+        if isinstance(aggregations, list):
+            aggregations = {
+                a.get('name') or f"{a.get('function', 'count')}_{a.get('field', 'id')}":
+                {'function': a.get('function', 'count'), 'field': a.get('field', 'id')}
+                for a in aggregations if isinstance(a, dict)
+            }
+
         if group_by:
             queryset = queryset.values(*group_by)
             for agg_name, agg_config in aggregations.items():
@@ -105,8 +154,21 @@ class QueryBuilderService:
             queryset = queryset.order_by(*order_by)
         limit = query_config.get('limit', 1000)
         if not group_by and not aggregations:
-            return list(queryset.values()[:limit])
-        return list(queryset[:limit])
+            rows = list(queryset.values()[:limit])
+        else:
+            rows = list(queryset[:limit])
+
+        # Django's .values() returns UUIDs / dates / Decimals as Python objects;
+        # Graphene's JSONString cannot serialise these, so coerce to primitives.
+        def _coerce(v):
+            if isinstance(v, uuid_mod.UUID):
+                return str(v)
+            if isinstance(v, (datetime.date, datetime.datetime, datetime.time)):
+                return v.isoformat()
+            if isinstance(v, decimal.Decimal):
+                return float(v)
+            return v
+        return [{k: _coerce(v) for k, v in row.items()} for row in rows]
 
     @classmethod
     def _get_orm_entity_fields(cls, entity_type: str) -> List[Dict]:

@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 import graphene
@@ -10,6 +11,28 @@ from core.schema import OrderedDjangoFilterConnectionField
 
 from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, AnalyticsExport
 from .services import QueryBuilderService, ExportService
+
+
+def _resolve_pk(raw_id):
+    """Accept either a plain UUID or a Relay global ID (base64 of `Type:UUID`).
+
+    Graphene-Django's Relay node wrapper exposes the `id` field on objects as a base64
+    string like `QW5hbHl0aWNzRGFzaGJvYXJkVHlwZTox...`; the UI sometimes forwards that
+    straight into `analytics_dashboard(id)` lookups whose `.get(pk=...)` call expects the
+    raw primary key. Normalise here so both shapes resolve.
+    """
+    if not isinstance(raw_id, str):
+        return raw_id
+    # If it already looks like a UUID, return it untouched.
+    if len(raw_id) >= 32 and '-' in raw_id and not raw_id.endswith('='):
+        return raw_id
+    try:
+        decoded = base64.b64decode(raw_id).decode('utf-8', errors='replace')
+        if ':' in decoded:
+            return decoded.rsplit(':', 1)[-1]
+    except Exception:  # noqa: BLE001 — malformed ID will fail the subsequent .get()
+        return raw_id
+    return raw_id
 
 
 class AnalyticsQueryType(DjangoObjectType):
@@ -104,7 +127,7 @@ class Query(graphene.ObjectType):
         return qs
 
     def resolve_analytics_query(self, info, id):
-        return AnalyticsQuery.objects.get(pk=id)
+        return AnalyticsQuery.objects.get(pk=_resolve_pk(id))
 
     def resolve_analytics_dashboards(self, info, **kwargs):
         qs = AnalyticsDashboard.objects.filter(validity_to__isnull=True)
@@ -113,12 +136,17 @@ class Query(graphene.ObjectType):
         return qs
 
     def resolve_analytics_dashboard(self, info, id):
-        return AnalyticsDashboard.objects.get(pk=id)
+        return AnalyticsDashboard.objects.get(pk=_resolve_pk(id))
 
     def resolve_execute_analytics_query(self, info, entity_type, query_config):
         start = time.time()
         config = json.loads(query_config) if isinstance(query_config, str) else query_config
-        results = QueryBuilderService.execute_query(entity_type, config)
+        # Graphene auto-uppercases Django choice fields when exposing them as enums; the
+        # service layer stores and expects lowercase keys ("beneficiary", "payment", ...).
+        # Normalise here so both UI (lowercase form state) and saved-query execution
+        # (enum value from GraphQL) hit the same code path.
+        normalised_entity = (entity_type or '').lower()
+        results = QueryBuilderService.execute_query(normalised_entity, config)
         return QueryResultType(
             data=results,
             row_count=len(results),
@@ -126,7 +154,8 @@ class Query(graphene.ObjectType):
         )
 
     def resolve_analytics_entity_fields(self, info, entity_type):
-        fields = QueryBuilderService.get_entity_fields(entity_type)
+        normalised_entity = (entity_type or '').lower()
+        fields = QueryBuilderService.get_entity_fields(normalised_entity)
         return [EntityFieldType(**f) for f in fields]
 
     def resolve_analytics_exports(self, info, **kwargs):
