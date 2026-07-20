@@ -4,6 +4,7 @@ MODULE_NAME = "analytics"
 
 DEFAULT_CFG = {
     "analytics_max_export_rows": 100000,
+    "analytics_max_query_rows": 10000,
     "analytics_cache_ttl": 300,  # 5 minutes
     "analytics_enable_sql_queries": False,
     "gql_analytics_dashboards_perms": ["200001"],
@@ -26,6 +27,7 @@ class AnalyticsConfig(AppConfig):
 
     # Configuration
     analytics_max_export_rows = DEFAULT_CFG["analytics_max_export_rows"]
+    analytics_max_query_rows = DEFAULT_CFG["analytics_max_query_rows"]
     analytics_cache_ttl = DEFAULT_CFG["analytics_cache_ttl"]
     analytics_enable_sql_queries = DEFAULT_CFG["analytics_enable_sql_queries"]
 

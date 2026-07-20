@@ -13,6 +13,18 @@ from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, Analyti
 from .services import QueryBuilderService, ExportService
 
 
+def _check_perms(user, perms):
+    if not user or not getattr(user, 'id', None) or not user.has_perms(perms):
+        raise PermissionDenied("Unauthorized")
+
+
+def _visible_to(qs, user):
+    """Scope saved queries/dashboards to public records or the caller's own."""
+    if user.is_superuser:
+        return qs
+    return qs.filter(Q(is_public=True) | Q(created_by=user))
+
+
 def _resolve_pk(raw_id):
     """Accept either a plain UUID or a Relay global ID (base64 of `Type:UUID`).
 
@@ -121,24 +133,32 @@ class Query(graphene.ObjectType):
     )
 
     def resolve_analytics_queries(self, info, **kwargs):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
         qs = AnalyticsQuery.objects.filter(validity_to__isnull=True)
-        if not info.context.user.is_superuser:
-            qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
-        return qs
+        return _visible_to(qs, info.context.user)
 
     def resolve_analytics_query(self, info, id):
-        return AnalyticsQuery.objects.get(pk=_resolve_pk(id))
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
+        qs = _visible_to(AnalyticsQuery.objects.all(), info.context.user)
+        return qs.get(pk=_resolve_pk(id))
 
     def resolve_analytics_dashboards(self, info, **kwargs):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_dashboards_perms)
         qs = AnalyticsDashboard.objects.filter(validity_to__isnull=True)
-        if not info.context.user.is_superuser:
-            qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
-        return qs
+        return _visible_to(qs, info.context.user)
 
     def resolve_analytics_dashboard(self, info, id):
-        return AnalyticsDashboard.objects.get(pk=_resolve_pk(id))
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_dashboards_perms)
+        qs = _visible_to(AnalyticsDashboard.objects.all(), info.context.user)
+        return qs.get(pk=_resolve_pk(id))
 
     def resolve_execute_analytics_query(self, info, entity_type, query_config):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
         start = time.time()
         config = json.loads(query_config) if isinstance(query_config, str) else query_config
         # Graphene auto-uppercases Django choice fields when exposing them as enums; the
@@ -154,11 +174,15 @@ class Query(graphene.ObjectType):
         )
 
     def resolve_analytics_entity_fields(self, info, entity_type):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
         normalised_entity = (entity_type or '').lower()
         fields = QueryBuilderService.get_entity_fields(normalised_entity)
         return [EntityFieldType(**f) for f in fields]
 
     def resolve_analytics_exports(self, info, **kwargs):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_export_perms)
         qs = AnalyticsExport.objects.all()
         if not info.context.user.is_superuser:
             qs = qs.filter(exported_by=info.context.user)
@@ -228,6 +252,7 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
         from datetime import datetime
         from analytics.apps import AnalyticsConfig
 
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_export_perms)
         config = json.loads(query_config) if isinstance(query_config, str) else query_config
         results = QueryBuilderService.execute_query(entity_type, config)
 

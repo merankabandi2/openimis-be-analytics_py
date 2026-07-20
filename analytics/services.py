@@ -67,6 +67,21 @@ class QueryBuilderService:
         return models.get(entity_type)
 
     @classmethod
+    def _allowed_field_names(cls, model):
+        """Concrete field names of the entity itself — the only names client
+        configs may reference. Rejecting anything else (in particular `__`
+        FK traversals) keeps a query scoped to the allowlisted entity instead
+        of walking relations into Individual/Group PII."""
+        allowed = set()
+        for field in model._meta.get_fields():
+            if getattr(field, 'concrete', False) and not field.many_to_many:
+                allowed.add(field.name)
+                attname = getattr(field, 'attname', None)
+                if attname:
+                    allowed.add(attname)
+        return allowed
+
+    @classmethod
     def _execute_orm_query(cls, entity_type: str, query_config: Dict) -> List[Dict]:
         import datetime
         import decimal
@@ -77,6 +92,14 @@ class QueryBuilderService:
         model = cls._get_orm_model(entity_type)
         if not model:
             raise ValueError(f"Unknown entity type: {entity_type}")
+
+        allowed_fields = cls._allowed_field_names(model)
+
+        def _require_allowed(name, context):
+            if name not in allowed_fields:
+                raise ValueError(
+                    f"Field '{name}' is not allowed in {context} for entity '{entity_type}'"
+                )
 
         queryset = model.objects.all()
 
@@ -98,6 +121,7 @@ class QueryBuilderService:
         for field, condition in iterable:
             if not field:
                 continue
+            _require_allowed(field, 'filters')
             if isinstance(condition, dict):
                 op = condition.get('operator', 'exact')
                 val = condition.get('value')
@@ -142,17 +166,30 @@ class QueryBuilderService:
             }
 
         if group_by:
+            for name in group_by:
+                _require_allowed(name, 'group_by')
             queryset = queryset.values(*group_by)
             for agg_name, agg_config in aggregations.items():
                 func = agg_funcs.get(agg_config['function'])
                 if func:
-                    queryset = queryset.annotate(**{agg_name: func(agg_config.get('field', 'id'))})
+                    agg_field = agg_config.get('field', 'id')
+                    _require_allowed(agg_field, 'aggregations')
+                    queryset = queryset.annotate(**{agg_name: func(agg_field)})
 
         # Order + limit
         order_by = query_config.get('order_by', [])
         if order_by:
+            for name in order_by:
+                bare = name[1:] if isinstance(name, str) and name.startswith('-') else name
+                if bare not in aggregations:
+                    _require_allowed(bare, 'order_by')
             queryset = queryset.order_by(*order_by)
-        limit = query_config.get('limit', 1000)
+        from analytics.apps import AnalyticsConfig
+        try:
+            limit = int(query_config.get('limit', 1000))
+        except (TypeError, ValueError):
+            limit = 1000
+        limit = max(1, min(limit, AnalyticsConfig.analytics_max_query_rows))
         if not group_by and not aggregations:
             rows = list(queryset.values()[:limit])
         else:
