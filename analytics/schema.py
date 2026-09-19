@@ -206,6 +206,8 @@ class CreateAnalyticsQueryMutation(graphene.Mutation):
     query = graphene.Field(AnalyticsQueryType)
 
     def mutate(self, info, input):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_create_perms)
         obj = AnalyticsQuery.objects.create(
             name=input.name,
             description=input.description,
@@ -225,6 +227,8 @@ class UpdateAnalyticsQueryMutation(graphene.Mutation):
     query = graphene.Field(AnalyticsQueryType)
 
     def mutate(self, info, id, input):
+        from analytics.apps import AnalyticsConfig
+        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_update_perms)
         obj = AnalyticsQuery.objects.get(pk=id)
         if obj.created_by != info.context.user and not info.context.user.is_superuser:
             raise PermissionDenied("You can only edit your own queries")
@@ -262,12 +266,7 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"analytics_{entity_type}_{timestamp}"
 
-        if export_format == 'excel':
-            filepath = ExportService.export_to_excel(results, filename)
-        elif export_format == 'csv':
-            filepath = ExportService.export_to_csv(results, filename)
-        else:
-            raise ValueError(f"Unsupported format: {export_format}")
+        filepath = ExportService.export(results, filename, export_format)
 
         record = AnalyticsExport.objects.create(
             query_id=query_id,

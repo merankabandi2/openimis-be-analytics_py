@@ -230,6 +230,19 @@ class QueryBuilderService:
 class ExportService:
     """Service to handle data exports in multiple formats."""
 
+    EXPORTERS = {
+        'excel': 'export_to_excel',
+        'csv': 'export_to_csv',
+    }
+
+    @classmethod
+    def export(cls, data: List[Dict], filename: str, export_format: str) -> str:
+        """Dispatch to the exporter for `export_format`, or raise if unsupported."""
+        exporter_name = cls.EXPORTERS.get(export_format)
+        if not exporter_name:
+            raise ValueError(f"Unsupported export format: {export_format}")
+        return getattr(cls, exporter_name)(data, filename)
+
     @classmethod
     def export_to_excel(cls, data: List[Dict], filename: str) -> str:
         df = pd.DataFrame(data)
@@ -247,37 +260,6 @@ class ExportService:
         df = pd.DataFrame(data)
         filepath = f"/tmp/{filename}.csv"
         df.to_csv(filepath, index=False)
-        return filepath
-
-    @classmethod
-    def export_to_pdf(cls, data: List[Dict], filename: str, title: str = "Analytics Report") -> str:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import letter, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet
-
-        df = pd.DataFrame(data)
-        filepath = f"/tmp/{filename}.pdf"
-        doc = SimpleDocTemplate(filepath, pagesize=landscape(letter))
-        elements = []
-        styles = getSampleStyleSheet()
-        elements.append(Paragraph(title, styles['Title']))
-        elements.append(Spacer(1, 12))
-
-        data_list = [df.columns.tolist()] + df.values.tolist()
-        table = Table(data_list)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        doc.build(elements)
         return filepath
 
 
