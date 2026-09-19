@@ -87,7 +87,6 @@ class AnalyticsExport(models.Model):
         choices=[
             ('excel', 'Excel'),
             ('csv', 'CSV'),
-            ('pdf', 'PDF'),
         ]
     )
     filters_applied = models.JSONField(default=dict)

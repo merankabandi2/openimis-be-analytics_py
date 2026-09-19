@@ -12,6 +12,8 @@ DEFAULT_CFG = {
     "gql_analytics_export_perms": ["200003"],
     "gql_analytics_dashboard_create_perms": ["200004"],
     "gql_analytics_dashboard_share_perms": ["200005"],
+    "gql_analytics_query_create_perms": ["200006"],
+    "gql_analytics_query_update_perms": ["200007"],
 }
 
 
@@ -24,6 +26,8 @@ class AnalyticsConfig(AppConfig):
     gql_analytics_export_perms = DEFAULT_CFG["gql_analytics_export_perms"]
     gql_analytics_dashboard_create_perms = DEFAULT_CFG["gql_analytics_dashboard_create_perms"]
     gql_analytics_dashboard_share_perms = DEFAULT_CFG["gql_analytics_dashboard_share_perms"]
+    gql_analytics_query_create_perms = DEFAULT_CFG["gql_analytics_query_create_perms"]
+    gql_analytics_query_update_perms = DEFAULT_CFG["gql_analytics_query_update_perms"]
 
     # Configuration
     analytics_max_export_rows = DEFAULT_CFG["analytics_max_export_rows"]

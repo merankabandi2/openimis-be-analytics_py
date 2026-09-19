@@ -1,20 +1,26 @@
 import os
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse, JsonResponse, Http404
 from django.contrib.auth.decorators import login_required, permission_required
 from django.views.decorators.http import require_http_methods
+from .apps import AnalyticsConfig
 from .models import AnalyticsExport
 from .services import QueryBuilderService
 
 
 @login_required
-@permission_required('analytics.view_analytics_export')
 def download_export(request, export_id):
     """
     Download an exported file
     """
+    # The module's numeric right code (RoleRight), same check as resolve_analytics_exports
+    # in schema.py — Django's declared-permission `permission_required` has no matching
+    # permission for AnalyticsExport, so it can never be satisfied.
+    if not request.user.has_perms(AnalyticsConfig.gql_analytics_export_perms):
+        raise PermissionDenied("Unauthorized")
     try:
         export_record = AnalyticsExport.objects.get(pk=export_id)
-        
+
         # Check permissions
         if export_record.exported_by != request.user and not request.user.is_superuser:
             raise Http404("Export not found")
