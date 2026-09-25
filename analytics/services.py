@@ -475,8 +475,7 @@ class ExportService:
         'excel': 'export_to_excel',
         'csv': 'export_to_csv',
     }
-    # Under MEDIA_ROOT, which the deployment mounts as a volume and does not
-    # serve over HTTP: files are handed out only by the download view.
+    # Under MEDIA_ROOT; export files are handed out only by the download view.
     EXPORT_SUBDIR = 'analytics_exports'
 
     @classmethod
