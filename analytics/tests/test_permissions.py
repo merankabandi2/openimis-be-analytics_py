@@ -13,7 +13,7 @@ from core.test_helpers import create_test_interactive_user, create_test_role
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsExport, AnalyticsQuery
 from analytics.schema import CreateAnalyticsQueryMutation, UpdateAnalyticsQueryMutation
-from analytics.services import ExportService, QueryBuilderService
+from analytics.services import ExportService, QueryBuilderService, QueryResult
 
 
 def _info(user):
@@ -156,7 +156,7 @@ class PdfExportFormatRemovedTest(TestCase):
     def test_export_mutation_rejects_pdf_format(self):
         from analytics.schema import ExportAnalyticsDataMutation
 
-        with mock.patch.object(QueryBuilderService, 'execute_query', return_value=[]):
+        with mock.patch.object(QueryBuilderService, 'execute_query', return_value=QueryResult([], False)):
             with self.assertRaises(ValueError):
                 ExportAnalyticsDataMutation.mutate(
                     None,

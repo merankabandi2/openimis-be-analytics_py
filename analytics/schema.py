@@ -1,7 +1,11 @@
 import base64
 import json
 import time
+import uuid
+from datetime import datetime as py_datetime
+
 import graphene
+from django.db import transaction
 from django.db.models import Q
 from graphene_django import DjangoObjectType
 from django.core.exceptions import PermissionDenied
@@ -23,6 +27,45 @@ def _visible_to(qs, user):
     if user.is_superuser:
         return qs
     return qs.filter(Q(is_public=True) | Q(created_by=user))
+
+
+def _can_edit_dashboard(user, dashboard):
+    from analytics.apps import AnalyticsConfig
+    if not user or not getattr(user, 'id', None):
+        return False
+    if not user.has_perms(AnalyticsConfig.gql_analytics_dashboard_create_perms):
+        return False
+    return user.is_superuser or dashboard.created_by_id == user.id
+
+
+def _check_share_perms(user):
+    from analytics.apps import AnalyticsConfig
+    if not user.has_perms(AnalyticsConfig.gql_analytics_dashboard_share_perms):
+        raise PermissionDenied("Making a query public requires the analytics share right")
+
+
+def _normalise_entity_type(entity_type):
+    """Graphene exposes Django choice fields as uppercase enums; the service layer
+    uses the lowercase choice keys."""
+    normalised = (entity_type or '').lower()
+    if normalised not in QueryBuilderService.ENTITY_TYPES:
+        raise ValueError(f"Unknown entity type: {entity_type}")
+    return normalised
+
+
+def _load_config(query_config):
+    return json.loads(query_config) if isinstance(query_config, str) else query_config
+
+
+def _query_result(entity_type, config, user):
+    start = time.time()
+    result = QueryBuilderService.execute_query(entity_type, config, user)
+    return QueryResultType(
+        data=result.rows,
+        row_count=len(result.rows),
+        truncated=result.truncated,
+        execution_time=time.time() - start,
+    )
 
 
 def _resolve_pk(raw_id):
@@ -60,6 +103,8 @@ class AnalyticsQueryType(DjangoObjectType):
 
 
 class AnalyticsDashboardType(DjangoObjectType):
+    can_edit = graphene.Boolean()
+
     class Meta:
         model = AnalyticsDashboard
         interfaces = (graphene.relay.Node,)
@@ -69,6 +114,9 @@ class AnalyticsDashboardType(DjangoObjectType):
             'is_default': ['exact'],
         }
         connection_class = ExtendedConnection
+
+    def resolve_can_edit(self, info):
+        return _can_edit_dashboard(info.context.user, self)
 
 
 class AnalyticsWidgetType(DjangoObjectType):
@@ -100,6 +148,8 @@ class EntityFieldType(graphene.ObjectType):
 class QueryResultType(graphene.ObjectType):
     data = graphene.JSONString()
     row_count = graphene.Int()
+    # True when more rows matched than the row limit returned.
+    truncated = graphene.Boolean()
     execution_time = graphene.Float()
 
 
@@ -122,6 +172,11 @@ class Query(graphene.ObjectType):
         query_config=graphene.JSONString(required=True),
     )
 
+    execute_analytics_widget = graphene.Field(
+        QueryResultType,
+        widget_id=graphene.ID(required=True),
+    )
+
     analytics_entity_fields = graphene.List(
         EntityFieldType,
         entity_type=graphene.String(required=True),
@@ -141,7 +196,7 @@ class Query(graphene.ObjectType):
     def resolve_analytics_query(self, info, id):
         from analytics.apps import AnalyticsConfig
         _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
-        qs = _visible_to(AnalyticsQuery.objects.all(), info.context.user)
+        qs = _visible_to(AnalyticsQuery.objects.filter(validity_to__isnull=True), info.context.user)
         return qs.get(pk=_resolve_pk(id))
 
     def resolve_analytics_dashboards(self, info, **kwargs):
@@ -159,18 +214,29 @@ class Query(graphene.ObjectType):
     def resolve_execute_analytics_query(self, info, entity_type, query_config):
         from analytics.apps import AnalyticsConfig
         _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
-        start = time.time()
-        config = json.loads(query_config) if isinstance(query_config, str) else query_config
-        # Graphene auto-uppercases Django choice fields when exposing them as enums; the
-        # service layer stores and expects lowercase keys ("beneficiary", "payment", ...).
-        # Normalise here so both UI (lowercase form state) and saved-query execution
-        # (enum value from GraphQL) hit the same code path.
-        normalised_entity = (entity_type or '').lower()
-        results = QueryBuilderService.execute_query(normalised_entity, config)
-        return QueryResultType(
-            data=results,
-            row_count=len(results),
-            execution_time=time.time() - start,
+        return _query_result(
+            _normalise_entity_type(entity_type), _load_config(query_config), info.context.user
+        )
+
+    def resolve_execute_analytics_widget(self, info, widget_id):
+        """Run a dashboard widget's saved query for a dashboard viewer.
+
+        Viewing a dashboard needs only the dashboards right; the widget's query
+        still runs with the viewer's data scoping.
+        """
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_dashboards_perms)
+        widget = AnalyticsWidget.objects.select_related('query').get(
+            pk=_resolve_pk(widget_id), validity_to__isnull=True
+        )
+        dashboards = _visible_to(AnalyticsDashboard.objects.filter(validity_to__isnull=True), user)
+        if not dashboards.filter(pk=widget.dashboard_id).exists():
+            raise PermissionDenied("This dashboard is not visible to you")
+        if widget.query.validity_to is not None:
+            raise ValueError("The query of this widget has been deleted")
+        return _query_result(
+            _normalise_entity_type(widget.query.entity_type), widget.query.query_config, user
         )
 
     def resolve_analytics_entity_fields(self, info, entity_type):
@@ -207,14 +273,17 @@ class CreateAnalyticsQueryMutation(graphene.Mutation):
 
     def mutate(self, info, input):
         from analytics.apps import AnalyticsConfig
-        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_create_perms)
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_query_create_perms)
+        if input.is_public:
+            _check_share_perms(user)
         obj = AnalyticsQuery.objects.create(
             name=input.name,
             description=input.description,
-            entity_type=input.entity_type,
-            query_config=json.loads(input.query_config) if isinstance(input.query_config, str) else input.query_config,
+            entity_type=_normalise_entity_type(input.entity_type),
+            query_config=_load_config(input.query_config),
             is_public=input.is_public or False,
-            created_by=info.context.user,
+            created_by=user,
         )
         return CreateAnalyticsQueryMutation(query=obj)
 
@@ -228,18 +297,80 @@ class UpdateAnalyticsQueryMutation(graphene.Mutation):
 
     def mutate(self, info, id, input):
         from analytics.apps import AnalyticsConfig
-        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_update_perms)
-        obj = AnalyticsQuery.objects.get(pk=id)
-        if obj.created_by != info.context.user and not info.context.user.is_superuser:
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
+        obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
+        if obj.created_by != user and not user.is_superuser:
             raise PermissionDenied("You can only edit your own queries")
+        if input.is_public and not obj.is_public:
+            _check_share_perms(user)
         obj.name = input.name
         obj.description = input.description
-        obj.entity_type = input.entity_type
-        obj.query_config = json.loads(input.query_config) if isinstance(input.query_config, str) else input.query_config
+        obj.entity_type = _normalise_entity_type(input.entity_type)
+        obj.query_config = _load_config(input.query_config)
         if input.is_public is not None:
             obj.is_public = input.is_public
         obj.save()
         return UpdateAnalyticsQueryMutation(query=obj)
+
+
+class DeleteAnalyticsQueryMutation(graphene.Mutation):
+    """Retire a saved query (sets validity_to). Uses the query update right and
+    the same ownership rule as UpdateAnalyticsQueryMutation."""
+
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+
+    def mutate(self, info, id):
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
+        obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
+        if obj.created_by != user and not user.is_superuser:
+            raise PermissionDenied("You can only delete your own queries")
+        if AnalyticsWidget.objects.filter(query=obj, validity_to__isnull=True).exists():
+            raise ValueError("This query is used by a dashboard widget and cannot be deleted")
+        obj.validity_to = py_datetime.now()
+        obj.save()
+        return DeleteAnalyticsQueryMutation(success=True)
+
+
+class UpdateAnalyticsDashboardLayoutMutation(graphene.Mutation):
+    """Store widget positions of a dashboard. `positions` maps widget ids to
+    {x, y, w, h} grid coordinates."""
+
+    class Arguments:
+        dashboard_id = graphene.ID(required=True)
+        positions = graphene.JSONString(required=True)
+
+    dashboard = graphene.Field(AnalyticsDashboardType)
+
+    def mutate(self, info, dashboard_id, positions):
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_dashboard_create_perms)
+        dashboard = AnalyticsDashboard.objects.get(pk=_resolve_pk(dashboard_id), validity_to__isnull=True)
+        if not _can_edit_dashboard(user, dashboard):
+            raise PermissionDenied("You can only change the layout of your own dashboards")
+        positions = _load_config(positions)
+        if not isinstance(positions, dict):
+            raise ValueError("positions must map widget ids to {x, y, w, h}")
+        with transaction.atomic():
+            for raw_id, position in positions.items():
+                try:
+                    clean = {key: int(position[key]) for key in ('x', 'y', 'w', 'h')}
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError(f"Invalid position for widget {raw_id}")
+                if clean['x'] < 0 or clean['y'] < 0 or clean['w'] < 1 or clean['h'] < 1:
+                    raise ValueError(f"Invalid position for widget {raw_id}")
+                updated = AnalyticsWidget.objects.filter(
+                    pk=_resolve_pk(raw_id), dashboard=dashboard, validity_to__isnull=True
+                ).update(position=clean)
+                if not updated:
+                    raise ValueError(f"Widget {raw_id} is not on this dashboard")
+        return UpdateAnalyticsDashboardLayoutMutation(dashboard=dashboard)
 
 
 class ExportAnalyticsDataMutation(graphene.Mutation):
@@ -251,38 +382,48 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
 
     export_url = graphene.String()
     export_id = graphene.ID()
+    row_count = graphene.Int()
 
     def mutate(self, info, entity_type, query_config, export_format, query_id=None):
-        from datetime import datetime
         from analytics.apps import AnalyticsConfig
 
-        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_export_perms)
-        config = json.loads(query_config) if isinstance(query_config, str) else query_config
-        results = QueryBuilderService.execute_query(entity_type, config)
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_export_perms)
+        entity_type = _normalise_entity_type(entity_type)
+        config = _load_config(query_config)
+        # The export covers every matching row up to the export cap, not the
+        # on-screen row limit.
+        max_rows = AnalyticsConfig.analytics_max_export_rows
+        result = QueryBuilderService.execute_query(entity_type, config, user, max_rows=max_rows)
+        if result.truncated:
+            raise ValueError(
+                f"Export exceeds maximum rows ({max_rows}); add filters or grouping"
+            )
+        results = result.rows
 
-        if len(results) > AnalyticsConfig.analytics_max_export_rows:
-            raise Exception(f"Export exceeds maximum rows ({AnalyticsConfig.analytics_max_export_rows})")
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"analytics_{entity_type}_{timestamp}"
+        timestamp = py_datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"analytics_{entity_type}_{timestamp}_{uuid.uuid4().hex[:8]}"
 
         filepath = ExportService.export(results, filename, export_format)
 
         record = AnalyticsExport.objects.create(
-            query_id=query_id,
+            query_id=_resolve_pk(query_id) if query_id else None,
             export_format=export_format,
             filters_applied=config,
             row_count=len(results),
             file_path=filepath,
-            exported_by=info.context.user,
+            exported_by=user,
         )
         return ExportAnalyticsDataMutation(
             export_url=f"/api/analytics/download/{record.id}/",
             export_id=record.id,
+            row_count=len(results),
         )
 
 
 class Mutation(graphene.ObjectType):
     create_analytics_query = CreateAnalyticsQueryMutation.Field()
     update_analytics_query = UpdateAnalyticsQueryMutation.Field()
+    delete_analytics_query = DeleteAnalyticsQueryMutation.Field()
+    update_analytics_dashboard_layout = UpdateAnalyticsDashboardLayoutMutation.Field()
     export_analytics_data = ExportAnalyticsDataMutation.Field()

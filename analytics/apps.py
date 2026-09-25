@@ -1,4 +1,8 @@
+import logging
+
 from django.apps import AppConfig
+
+logger = logging.getLogger(__name__)
 
 MODULE_NAME = "analytics"
 
@@ -6,7 +10,6 @@ DEFAULT_CFG = {
     "analytics_max_export_rows": 100000,
     "analytics_max_query_rows": 10000,
     "analytics_cache_ttl": 300,  # 5 minutes
-    "analytics_enable_sql_queries": False,
     "gql_analytics_dashboards_perms": ["200001"],
     "gql_analytics_query_perms": ["200002"],
     "gql_analytics_export_perms": ["200003"],
@@ -33,7 +36,6 @@ class AnalyticsConfig(AppConfig):
     analytics_max_export_rows = DEFAULT_CFG["analytics_max_export_rows"]
     analytics_max_query_rows = DEFAULT_CFG["analytics_max_query_rows"]
     analytics_cache_ttl = DEFAULT_CFG["analytics_cache_ttl"]
-    analytics_enable_sql_queries = DEFAULT_CFG["analytics_enable_sql_queries"]
 
     def ready(self):
         from core.models import ModuleConfiguration
@@ -42,8 +44,8 @@ class AnalyticsConfig(AppConfig):
         try:
             from analytics.services import DashboardService
             DashboardService.create_default_dashboards()
-        except Exception:
-            pass  # Ignore on startup if DB not ready
+        except Exception as exc:  # the database may not be migrated yet
+            logger.warning("Built-in analytics dashboards not created: %s", exc)
 
     @classmethod
     def __load_config(cls, cfg):
