@@ -5,6 +5,8 @@ Idempotent — safe to rerun on fresh or existing databases.
 Usage:
     python manage.py seed_analytics_dashboards
 """
+import datetime
+import json
 import uuid
 
 from django.core.management.base import BaseCommand
@@ -17,7 +19,7 @@ from core.models import User
 DEFAULT_QUERIES = [
     {
         'name': 'Bénéficiaires par programme',
-        'entity_type': 'beneficiary',
+        'entity_type': 'group_beneficiary',
         'query_config': {'measures': ['count'], 'dimensions': ['benefit_plan__name'], 'filters': []},
     },
     {
@@ -32,9 +34,17 @@ DEFAULT_QUERIES = [
     },
     {
         'name': 'Bénéficiaires par province',
-        'entity_type': 'beneficiary',
-        'query_config': {'measures': ['count'], 'dimensions': ['location__parent__name'], 'filters': []},
+        'entity_type': 'group_beneficiary',
+        # Group location is the colline; its grandparent is the province.
+        'query_config': {
+            'measures': ['count'], 'dimensions': ['group__location__parent__parent__name'], 'filters': [],
+        },
     },
+]
+
+# Seed queries that no longer apply. Reseeding retires (sets validity_to on) a row
+# that still holds this definition and backs no widget.
+RETIRED_QUERIES = [
     {
         'name': 'Activités par statut',
         'entity_type': 'beneficiary',
@@ -47,18 +57,21 @@ DEFAULT_WIDGETS = [
         'query_name': 'Bénéficiaires par programme',
         'widget_type': 'bar_chart',
         'title': 'Bénéficiaires par programme',
+        'config': {'display': 'default', 'xAxisKey': 'benefit_plan__name', 'dataKey': 'count_value'},
         'position': {'x': 0, 'y': 0, 'w': 6, 'h': 4},
     },
     {
         'query_name': 'Paiements par statut',
         'widget_type': 'pie_chart',
         'title': 'Paiements par statut',
+        'config': {'display': 'default', 'nameKey': 'status', 'dataKey': 'count_value'},
         'position': {'x': 6, 'y': 0, 'w': 6, 'h': 4},
     },
     {
         'query_name': 'Plaintes par catégorie',
         'widget_type': 'bar_chart',
         'title': 'Plaintes par catégorie',
+        'config': {'display': 'default', 'xAxisKey': 'category', 'dataKey': 'count_value'},
         'position': {'x': 0, 'y': 4, 'w': 12, 'h': 4},
     },
 ]
@@ -110,6 +123,16 @@ class Command(BaseCommand):
                 if changed:
                     q.save(update_fields=['entity_type', 'query_config', 'is_public'])
 
+        retired = 0
+        for q_def in RETIRED_QUERIES:
+            for q in AnalyticsQuery.objects.filter(
+                name=q_def['name'], entity_type=q_def['entity_type'], validity_to__isnull=True,
+            ):
+                if q.query_config == q_def['query_config'] and not q.analyticswidget_set.exists():
+                    q.validity_to = datetime.datetime.now()
+                    q.save(update_fields=['validity_to'])
+                    retired += 1
+
         # Seed dashboard
         dash, dash_created = AnalyticsDashboard.objects.get_or_create(
             name='Tableau de Bord Principal',
@@ -141,8 +164,8 @@ class Command(BaseCommand):
                     """, [
                         str(wid), str(dash.id), str(query.id),
                         w_def['widget_type'], w_def['title'],
-                        '{"display": "default"}',
-                        str(w_def['position']).replace("'", '"'),
+                        json.dumps(w_def['config']),
+                        json.dumps(w_def['position']),
                     ])
                 created_widgets += 1
         else:
@@ -151,5 +174,6 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'Seed complete: {created_queries} new queries, '
             f'{created_widgets} new widgets, '
+            f'{retired} retired queries, '
             f'{1 if dash_created else 0} new dashboards'
         ))
