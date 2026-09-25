@@ -17,6 +17,7 @@ class AnalyticsQuery(core_models.VersionedModel):
             ('individual', 'Individual'),
             ('group', 'Group'),
             ('beneficiary', 'Beneficiary'),
+            ('group_beneficiary', 'Group beneficiary'),
             ('payment', 'Payment'),
             ('grievance', 'Grievance'),
         ]

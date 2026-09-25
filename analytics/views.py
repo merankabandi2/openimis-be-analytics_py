@@ -1,4 +1,6 @@
 import os
+from functools import wraps
+
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse, JsonResponse, Http404
 from django.contrib.auth.decorators import login_required, permission_required
@@ -8,7 +10,25 @@ from .models import AnalyticsExport
 from .services import QueryBuilderService
 
 
-@login_required
+def jwt_or_session_login_required(view):
+    """login_required that also accepts a JWT (cookie or bearer header), which is
+    how the web client authenticates; it holds no Django session."""
+    @wraps(view)
+    def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            from rest_framework.exceptions import APIException
+            from core.jwt_authentication import JWTAuthentication
+            try:
+                authenticated = JWTAuthentication().authenticate(request)
+            except APIException:
+                authenticated = None
+            if authenticated:
+                request.user = authenticated[0]
+        return login_required(view)(request, *args, **kwargs)
+    return wrapper
+
+
+@jwt_or_session_login_required
 def download_export(request, export_id):
     """
     Download an exported file
