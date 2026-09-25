@@ -136,6 +136,16 @@ class DateFilterResolverTest(TestCase):
     def test_calendar_day_matches_the_date_column(self):
         self.assertEqual(self._dob('exact', '1990-01-01'), [{'first_name': 'Dated'}])
 
+    def test_range_of_calendar_days_matches(self):
+        self.assertEqual(self._dob('range', ['1989-12-31', '1990-01-02']), [{'first_name': 'Dated'}])
+
+    def test_greater_than_a_calendar_day_matches(self):
+        self.assertEqual(self._dob('gt', '1989-12-31'), [{'first_name': 'Dated'}])
+
+    def test_range_with_a_timestamp_bound_is_refused(self):
+        with self.assertRaises(ValueError):
+            self._dob('range', ['1989-12-31T22:00:00.000Z', '1990-01-02'])
+
     def test_timestamp_on_a_date_column_is_refused_instead_of_matching_nothing(self):
         with self.assertRaises(ValueError):
             self._dob('exact', '1990-01-01T11:57:00.000Z')
