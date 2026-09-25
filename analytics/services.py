@@ -286,6 +286,46 @@ class QueryBuilderService:
         return filters, list(group_by), aggregations, list(order_by), list(fields)
 
     @staticmethod
+    def _is_date_only_field(model, path):
+        """True when `path` (possibly a relation path) ends on a date column that
+        holds no time of day."""
+        from django.core.exceptions import FieldDoesNotExist
+        from django.db import models as dj_models
+        field = None
+        for part in path.split('__'):
+            try:
+                field = model._meta.get_field(part)
+            except FieldDoesNotExist:
+                return False
+            if field.is_relation and field.related_model is not None:
+                model = field.related_model
+        return isinstance(field, dj_models.DateField) and not isinstance(field, dj_models.DateTimeField)
+
+    @staticmethod
+    def _check_date_values(field, condition):
+        """A date column compared with a timestamp never matches: openIMIS's
+        DateField turns the value into a datetime. Only YYYY-MM-DD is accepted."""
+        import datetime
+        import re
+        if not isinstance(condition, dict):
+            condition = {'value': condition}
+        if condition.get('operator') in ('isnull', 'is_not_null'):
+            return
+        value = condition.get('value')
+        values = value if isinstance(value, (list, tuple)) else (
+            value.split(',') if isinstance(value, str) and condition.get('operator') in ('in', 'not_in', 'range')
+            else [value]
+        )
+        for item in values:
+            text = str(item).strip()
+            try:
+                valid = bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', text)) and datetime.date.fromisoformat(text)
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError(f"Filter on date field '{field}' needs a YYYY-MM-DD value, got '{item}'")
+
+    @staticmethod
     def _filter_q(field, condition):
         from django.db.models import Q
         if not isinstance(condition, dict):
@@ -327,8 +367,10 @@ class QueryBuilderService:
 
         filters, group_by, aggregations, order_by, fields = cls._normalise_config(query_config)
 
-        for field, _ in filters:
+        for field, condition in filters:
             _require_allowed(field, 'filters')
+            if cls._is_date_only_field(model, field):
+                cls._check_date_values(field, condition)
         for name in group_by:
             _require_allowed(name, 'group_by')
         for agg_name, agg_config in aggregations.items():

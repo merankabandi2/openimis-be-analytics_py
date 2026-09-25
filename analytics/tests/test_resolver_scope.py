@@ -113,3 +113,39 @@ class ExportStorageTest(TestCase):
         media_root = os.path.realpath(settings.MEDIA_ROOT)
         self.assertEqual(os.path.commonpath([media_root, os.path.realpath(filepath)]), media_root)
         self.assertTrue(os.path.exists(filepath))
+
+
+class DateFilterResolverTest(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.admin = create_test_interactive_user(username='analytics_qb_admin')
+        self.marker = _marker()
+        Individual(
+            first_name='Dated', last_name=self.marker, dob=datetime.date(1990, 1, 1), json_ext={},
+        ).save(user=self.admin)
+
+    def _dob(self, operator, value):
+        return _execute(self.admin, 'individual', {
+            'filters': {
+                'last_name': {'operator': 'exact', 'value': self.marker},
+                'dob': {'operator': operator, 'value': value},
+            },
+            'fields': ['first_name'],
+        })
+
+    def test_calendar_day_matches_the_date_column(self):
+        self.assertEqual(self._dob('exact', '1990-01-01'), [{'first_name': 'Dated'}])
+
+    def test_timestamp_on_a_date_column_is_refused_instead_of_matching_nothing(self):
+        with self.assertRaises(ValueError):
+            self._dob('exact', '1990-01-01T11:57:00.000Z')
+
+    def test_timestamp_on_a_datetime_column_is_accepted(self):
+        rows = _execute(self.admin, 'individual', {
+            'filters': {
+                'last_name': {'operator': 'exact', 'value': self.marker},
+                'date_created': {'operator': 'gt', 'value': '2000-01-01T00:00:00.000Z'},
+            },
+            'fields': ['first_name'],
+        })
+        self.assertEqual(rows, [{'first_name': 'Dated'}])
