@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import pandas as pd
 from django.apps import apps
 from django.core.cache import cache
@@ -432,6 +433,16 @@ class ExportService:
         'excel': 'export_to_excel',
         'csv': 'export_to_csv',
     }
+    # Under MEDIA_ROOT, which the deployment mounts as a volume and does not
+    # serve over HTTP: files are handed out only by the download view.
+    EXPORT_SUBDIR = 'analytics_exports'
+
+    @classmethod
+    def export_dir(cls) -> str:
+        from django.conf import settings
+        directory = os.path.join(settings.MEDIA_ROOT, cls.EXPORT_SUBDIR)
+        os.makedirs(directory, exist_ok=True)
+        return directory
 
     @classmethod
     def export(cls, data: List[Dict], filename: str, export_format: str) -> str:
@@ -445,7 +456,7 @@ class ExportService:
     def export_to_excel(cls, data: List[Dict], filename: str) -> str:
         from openpyxl.utils import get_column_letter
         df = pd.DataFrame(data)
-        filepath = f"/tmp/{filename}.xlsx"
+        filepath = os.path.join(cls.export_dir(), f"{filename}.xlsx")
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='Data', index=False)
             worksheet = writer.sheets['Data']
@@ -457,7 +468,7 @@ class ExportService:
     @classmethod
     def export_to_csv(cls, data: List[Dict], filename: str) -> str:
         df = pd.DataFrame(data)
-        filepath = f"/tmp/{filename}.csv"
+        filepath = os.path.join(cls.export_dir(), f"{filename}.csv")
         df.to_csv(filepath, index=False)
         return filepath
 

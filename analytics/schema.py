@@ -1,6 +1,7 @@
 import base64
 import json
 import time
+import uuid
 from datetime import datetime as py_datetime
 
 import graphene
@@ -401,7 +402,7 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
         results = result.rows
 
         timestamp = py_datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"analytics_{entity_type}_{timestamp}"
+        filename = f"analytics_{entity_type}_{timestamp}_{uuid.uuid4().hex[:8]}"
 
         filepath = ExportService.export(results, filename, export_format)
 

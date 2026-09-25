@@ -28,6 +28,8 @@ The module supports the following configuration options:
 - `analytics_max_query_rows`: Maximum rows returned on screen (default: 10,000)
 - `analytics_cache_ttl`: Cache time-to-live in seconds (default: 300)
 
+Export files are written to `MEDIA_ROOT/analytics_exports/` and served only by the download endpoint, which checks the export right. `MEDIA_ROOT` must be on persistent storage and must not be served directly by a web server.
+
 ## Permissions
 
 - `200001` - View analytics dashboards (widget data included)
