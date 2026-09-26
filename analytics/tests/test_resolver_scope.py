@@ -66,6 +66,16 @@ class GrievanceResolverScopeTest(TestCase):
         self.assertEqual(sorted(row['category'] for row in rows), ['public'])
         self.assertNotIn('secret title', [row.get('title') for row in rows])
 
+    def test_withheld_restricted_tickets_are_reported_to_the_client(self):
+        user = _role_user(f'an_rs_gw_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ])
+        config = dict(self.config, filters=dict(self.config['filters'], category={'operator': 'exact', 'value': 'secret'}))
+        with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
+            result = Query().resolve_execute_analytics_query(
+                _info(user), entity_type='GRIEVANCE', query_config=json.dumps(config),
+            )
+        self.assertEqual((result.data, result.row_count), ([], 0))
+        self.assertTrue(result.restricted_rows_withheld)
+
 
 class LocationResolverScopeTest(TestCase):
     def setUp(self):

@@ -38,10 +38,42 @@ def _can_edit_dashboard(user, dashboard):
     return user.is_superuser or dashboard.created_by_id == user.id
 
 
+def _owns_query(user, query):
+    return user.is_superuser or query.created_by_id == user.id
+
+
+def _can_edit_query(user, query):
+    """Whether update/delete of this saved query would be accepted for `user`."""
+    from analytics.apps import AnalyticsConfig
+    if not user or not getattr(user, 'id', None):
+        return False
+    if not user.has_perms(AnalyticsConfig.gql_analytics_query_update_perms):
+        return False
+    return _owns_query(user, query)
+
+
 def _check_share_perms(user):
     from analytics.apps import AnalyticsConfig
     if not user.has_perms(AnalyticsConfig.gql_analytics_dashboard_share_perms):
-        raise PermissionDenied("Making a query public requires the analytics share right")
+        raise PermissionDenied("Making a query or dashboard public requires the analytics share right")
+
+
+def _editable_dashboard(user, dashboard_id):
+    """Active dashboard `dashboard_id`, checked against the dashboard create right
+    and the owner rule of _can_edit_dashboard."""
+    from analytics.apps import AnalyticsConfig
+    _check_perms(user, AnalyticsConfig.gql_analytics_dashboard_create_perms)
+    dashboard = AnalyticsDashboard.objects.get(pk=_resolve_pk(dashboard_id), validity_to__isnull=True)
+    if not _can_edit_dashboard(user, dashboard):
+        raise PermissionDenied("You can only change your own dashboards")
+    return dashboard
+
+
+def _required_text(value, label):
+    text = (value or '').strip()
+    if not text:
+        raise ValueError(f"{label} is required")
+    return text
 
 
 def _normalise_entity_type(entity_type):
@@ -64,6 +96,7 @@ def _query_result(entity_type, config, user):
         data=result.rows,
         row_count=len(result.rows),
         truncated=result.truncated,
+        restricted_rows_withheld=result.restricted_rows_withheld,
         execution_time=time.time() - start,
     )
 
@@ -91,6 +124,8 @@ def _resolve_pk(raw_id):
 
 
 class AnalyticsQueryType(DjangoObjectType):
+    can_edit = graphene.Boolean()
+
     class Meta:
         model = AnalyticsQuery
         interfaces = (graphene.relay.Node,)
@@ -100,6 +135,9 @@ class AnalyticsQueryType(DjangoObjectType):
             'is_public': ['exact'],
         }
         connection_class = ExtendedConnection
+
+    def resolve_can_edit(self, info):
+        return _can_edit_query(info.context.user, self)
 
 
 class AnalyticsDashboardType(DjangoObjectType):
@@ -117,6 +155,9 @@ class AnalyticsDashboardType(DjangoObjectType):
 
     def resolve_can_edit(self, info):
         return _can_edit_dashboard(info.context.user, self)
+
+    def resolve_widgets(self, info, **kwargs):
+        return self.widgets.filter(validity_to__isnull=True)
 
 
 class AnalyticsWidgetType(DjangoObjectType):
@@ -150,6 +191,9 @@ class QueryResultType(graphene.ObjectType):
     row_count = graphene.Int()
     # True when more rows matched than the row limit returned.
     truncated = graphene.Boolean()
+    # True when grievance tickets are left out because the query reads fields
+    # the user may not see on them; see QueryResult.restricted_rows_withheld.
+    restricted_rows_withheld = graphene.Boolean()
     execution_time = graphene.Float()
 
 
@@ -208,7 +252,7 @@ class Query(graphene.ObjectType):
     def resolve_analytics_dashboard(self, info, id):
         from analytics.apps import AnalyticsConfig
         _check_perms(info.context.user, AnalyticsConfig.gql_analytics_dashboards_perms)
-        qs = _visible_to(AnalyticsDashboard.objects.all(), info.context.user)
+        qs = _visible_to(AnalyticsDashboard.objects.filter(validity_to__isnull=True), info.context.user)
         return qs.get(pk=_resolve_pk(id))
 
     def resolve_execute_analytics_query(self, info, entity_type, query_config):
@@ -300,7 +344,7 @@ class UpdateAnalyticsQueryMutation(graphene.Mutation):
         user = info.context.user
         _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
         obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
-        if obj.created_by != user and not user.is_superuser:
+        if not _owns_query(user, obj):
             raise PermissionDenied("You can only edit your own queries")
         if input.is_public and not obj.is_public:
             _check_share_perms(user)
@@ -328,7 +372,7 @@ class DeleteAnalyticsQueryMutation(graphene.Mutation):
         user = info.context.user
         _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
         obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
-        if obj.created_by != user and not user.is_superuser:
+        if not _owns_query(user, obj):
             raise PermissionDenied("You can only delete your own queries")
         if AnalyticsWidget.objects.filter(query=obj, validity_to__isnull=True).exists():
             raise ValueError("This query is used by a dashboard widget and cannot be deleted")
@@ -348,12 +392,7 @@ class UpdateAnalyticsDashboardLayoutMutation(graphene.Mutation):
     dashboard = graphene.Field(AnalyticsDashboardType)
 
     def mutate(self, info, dashboard_id, positions):
-        from analytics.apps import AnalyticsConfig
-        user = info.context.user
-        _check_perms(user, AnalyticsConfig.gql_analytics_dashboard_create_perms)
-        dashboard = AnalyticsDashboard.objects.get(pk=_resolve_pk(dashboard_id), validity_to__isnull=True)
-        if not _can_edit_dashboard(user, dashboard):
-            raise PermissionDenied("You can only change the layout of your own dashboards")
+        dashboard = _editable_dashboard(info.context.user, dashboard_id)
         positions = _load_config(positions)
         if not isinstance(positions, dict):
             raise ValueError("positions must map widget ids to {x, y, w, h}")
@@ -371,6 +410,159 @@ class UpdateAnalyticsDashboardLayoutMutation(graphene.Mutation):
                 if not updated:
                     raise ValueError(f"Widget {raw_id} is not on this dashboard")
         return UpdateAnalyticsDashboardLayoutMutation(dashboard=dashboard)
+
+
+class AnalyticsDashboardInput(graphene.InputObjectType):
+    name = graphene.String(required=True)
+    description = graphene.String()
+    is_public = graphene.Boolean()
+
+
+class CreateAnalyticsDashboardMutation(graphene.Mutation):
+    """Create a dashboard owned by the caller (200004). A public dashboard also
+    needs the share right (200005)."""
+
+    class Arguments:
+        input = AnalyticsDashboardInput(required=True)
+
+    dashboard = graphene.Field(AnalyticsDashboardType)
+
+    def mutate(self, info, input):
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        _check_perms(user, AnalyticsConfig.gql_analytics_dashboard_create_perms)
+        if input.is_public:
+            _check_share_perms(user)
+        dashboard = AnalyticsDashboard.objects.create(
+            name=_required_text(input.name, "Dashboard name"),
+            description=input.description,
+            is_public=bool(input.is_public),
+            is_default=False,
+            created_by=user,
+            layout_config={"columns": 12, "rowHeight": 100},
+        )
+        return CreateAnalyticsDashboardMutation(dashboard=dashboard)
+
+
+class UpdateAnalyticsDashboardMutation(graphene.Mutation):
+    """Rename, describe, share or unshare a dashboard the caller may edit.
+    Sharing a private dashboard needs the share right."""
+
+    class Arguments:
+        id = graphene.ID(required=True)
+        input = AnalyticsDashboardInput(required=True)
+
+    dashboard = graphene.Field(AnalyticsDashboardType)
+
+    def mutate(self, info, id, input):
+        user = info.context.user
+        dashboard = _editable_dashboard(user, id)
+        if input.is_public and not dashboard.is_public:
+            _check_share_perms(user)
+        dashboard.name = _required_text(input.name, "Dashboard name")
+        dashboard.description = input.description
+        if input.is_public is not None:
+            dashboard.is_public = input.is_public
+        dashboard.save()
+        return UpdateAnalyticsDashboardMutation(dashboard=dashboard)
+
+
+class DeleteAnalyticsDashboardMutation(graphene.Mutation):
+    """Retire (set validity_to on) a dashboard the caller may edit, with its
+    widgets. The default dashboard cannot be retired."""
+
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+
+    def mutate(self, info, id):
+        dashboard = _editable_dashboard(info.context.user, id)
+        if dashboard.is_default:
+            raise ValueError("The default dashboard cannot be deleted")
+        now = py_datetime.now()
+        with transaction.atomic():
+            dashboard.widgets.filter(validity_to__isnull=True).update(validity_to=now)
+            dashboard.validity_to = now
+            dashboard.save()
+        return DeleteAnalyticsDashboardMutation(success=True)
+
+
+# Widget types the dashboard page draws.
+ADDABLE_WIDGET_TYPES = ('bar_chart', 'line_chart', 'pie_chart', 'table', 'metric')
+
+
+class AddAnalyticsWidgetMutation(graphene.Mutation):
+    """Add a widget showing a saved query to a dashboard the caller may edit.
+    The query must be one the caller can read (public or their own). Without a
+    position the widget goes below the existing ones."""
+
+    class Arguments:
+        dashboard_id = graphene.ID(required=True)
+        query_id = graphene.ID(required=True)
+        widget_type = graphene.String(required=True)
+        title = graphene.String(required=True)
+        config = graphene.JSONString()
+        position = graphene.JSONString()
+
+    widget = graphene.Field(AnalyticsWidgetType)
+
+    def mutate(self, info, dashboard_id, query_id, widget_type, title, config=None, position=None):
+        user = info.context.user
+        dashboard = _editable_dashboard(user, dashboard_id)
+        widget_type = (widget_type or '').lower()
+        if widget_type not in ADDABLE_WIDGET_TYPES:
+            raise ValueError(f"Unsupported widget type: {widget_type}")
+        queries = _visible_to(AnalyticsQuery.objects.filter(validity_to__isnull=True), user)
+        try:
+            query = queries.get(pk=_resolve_pk(query_id))
+        except AnalyticsQuery.DoesNotExist:
+            raise PermissionDenied("This query is not visible to you")
+        config = _load_config(config) if config else None
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be an object")
+        # Model validation refuses an empty config on save.
+        config = config or {'display': 'default'}
+        position = _load_config(position) if position else None
+        if position is None:
+            active = dashboard.widgets.filter(validity_to__isnull=True)
+            bottom = max(
+                (int(w.position.get('y', 0)) + int(w.position.get('h', 0))
+                 for w in active if isinstance(w.position, dict)),
+                default=0,
+            )
+            position = {'x': 0, 'y': bottom, 'w': 6, 'h': 4}
+        else:
+            try:
+                position = {key: int(position[key]) for key in ('x', 'y', 'w', 'h')}
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("position must hold integer x, y, w and h")
+            if position['x'] < 0 or position['y'] < 0 or position['w'] < 1 or position['h'] < 1:
+                raise ValueError("position must hold integer x, y, w and h")
+        widget = AnalyticsWidget.objects.create(
+            dashboard=dashboard,
+            query=query,
+            widget_type=widget_type,
+            title=_required_text(title, "Widget title"),
+            config=config,
+            position=position,
+        )
+        return AddAnalyticsWidgetMutation(widget=widget)
+
+
+class DeleteAnalyticsWidgetMutation(graphene.Mutation):
+    """Retire (set validity_to on) a widget of a dashboard the caller may edit."""
+
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+
+    def mutate(self, info, id):
+        widget = AnalyticsWidget.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
+        _editable_dashboard(info.context.user, widget.dashboard_id)
+        AnalyticsWidget.objects.filter(pk=widget.pk).update(validity_to=py_datetime.now())
+        return DeleteAnalyticsWidgetMutation(success=True)
 
 
 class ExportAnalyticsDataMutation(graphene.Mutation):
@@ -426,4 +618,9 @@ class Mutation(graphene.ObjectType):
     update_analytics_query = UpdateAnalyticsQueryMutation.Field()
     delete_analytics_query = DeleteAnalyticsQueryMutation.Field()
     update_analytics_dashboard_layout = UpdateAnalyticsDashboardLayoutMutation.Field()
+    create_analytics_dashboard = CreateAnalyticsDashboardMutation.Field()
+    update_analytics_dashboard = UpdateAnalyticsDashboardMutation.Field()
+    delete_analytics_dashboard = DeleteAnalyticsDashboardMutation.Field()
+    add_analytics_widget = AddAnalyticsWidgetMutation.Field()
+    delete_analytics_widget = DeleteAnalyticsWidgetMutation.Field()
     export_analytics_data = ExportAnalyticsDataMutation.Field()

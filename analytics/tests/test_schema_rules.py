@@ -3,12 +3,15 @@ import datetime
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 from unittest import mock
 
+import graphene
+from django.apps import apps
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from graphql_jwt.shortcuts import get_token
 
@@ -18,15 +21,22 @@ from individual.models import Individual
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsDashboard, AnalyticsExport, AnalyticsQuery, AnalyticsWidget
 from analytics.schema import (
+    AddAnalyticsWidgetMutation,
+    AnalyticsQueryType,
+    CreateAnalyticsDashboardMutation,
     CreateAnalyticsQueryMutation,
+    DeleteAnalyticsDashboardMutation,
     DeleteAnalyticsQueryMutation,
+    DeleteAnalyticsWidgetMutation,
     ExportAnalyticsDataMutation,
+    Mutation,
     Query,
     UpdateAnalyticsDashboardLayoutMutation,
+    UpdateAnalyticsDashboardMutation,
     UpdateAnalyticsQueryMutation,
     _can_edit_dashboard,
 )
-from analytics.services import DashboardService, ExportService, QueryBuilderService
+from analytics.services import ExportService, QueryBuilderService
 from analytics.tests.test_permissions import _info, _query_input
 from analytics.tests.test_query_builder import _marker, _role_user
 
@@ -114,6 +124,22 @@ class SavedQueryMutationTest(TestCase):
             DeleteAnalyticsQueryMutation.mutate(None, _info(self.other), str(obj.id))
         obj.refresh_from_db()
         self.assertIsNone(obj.validity_to)
+
+    def test_can_edit_is_true_only_for_the_owner(self):
+        obj = _saved_query(self.owner, is_public=True)
+        self.assertTrue(AnalyticsQueryType.resolve_can_edit(obj, _info(self.owner)))
+        self.assertFalse(AnalyticsQueryType.resolve_can_edit(obj, _info(self.other)))
+
+    def test_can_edit_needs_the_update_right(self):
+        reader = _role_user(f'an_reader_{self.marker}', [QUERY, CREATE])
+        obj = _saved_query(reader)
+        self.assertFalse(AnalyticsQueryType.resolve_can_edit(obj, _info(reader)))
+
+    def test_can_edit_holds_for_a_superuser_on_any_query(self):
+        admin = create_test_interactive_user(username=f'an_admin_{self.marker}')
+        self.assertTrue(admin.is_superuser)
+        obj = _saved_query(self.owner, is_public=True)
+        self.assertTrue(AnalyticsQueryType.resolve_can_edit(obj, _info(admin)))
 
     def test_delete_of_a_query_used_by_a_widget_is_refused(self):
         obj = _saved_query(self.owner)
@@ -245,15 +271,215 @@ class DownloadWithJwtTest(TestCase):
         self.assertEqual(client.get(self.url).status_code, 302)
 
 
-class DefaultDashboardsTest(TestCase):
-    def test_built_in_dashboards_are_created_without_a_second_default(self):
+BUILT_IN_DASHBOARDS = [
+    ('System Overview', 'Key system metrics'),
+    ('Beneficiary Analytics', 'Beneficiary management analytics'),
+    ('Payment Analytics', 'Payment tracking and analysis'),
+]
+
+
+class BuiltInDashboardsTest(TestCase):
+    def test_app_start_creates_no_dashboard(self):
         create_test_interactive_user(username='Admin')
-        DashboardService.create_default_dashboards()
-        names = set(AnalyticsDashboard.objects.values_list('name', flat=True))
-        self.assertTrue({'System Overview', 'Beneficiary Analytics', 'Payment Analytics'} <= names)
+        before = AnalyticsDashboard.objects.count()
+        apps.get_app_config('analytics').ready()
+        self.assertEqual(AnalyticsDashboard.objects.count(), before)
         self.assertFalse(AnalyticsDashboard.objects.filter(
-            name__in=['System Overview', 'Beneficiary Analytics', 'Payment Analytics'], is_default=True,
+            name__in=[name for name, _ in BUILT_IN_DASHBOARDS]
         ).exists())
+
+    @override_settings(IS_TESTING=False)
+    def test_reseed_retires_the_empty_built_in_dashboards_only(self):
+        admin = create_test_interactive_user(username='Admin')
+        layout = {"columns": 12, "rowHeight": 100}
+        empty = [
+            AnalyticsDashboard.objects.create(
+                name=name, description=desc, is_public=True, created_by=admin, layout_config=layout,
+            )
+            for name, desc in BUILT_IN_DASHBOARDS
+        ]
+        filled = AnalyticsDashboard.objects.create(
+            name='System Overview', description='Key system metrics', is_public=True, created_by=admin,
+            layout_config=layout,
+        )
+        AnalyticsWidget.objects.create(
+            dashboard=filled, query=_saved_query(admin), widget_type='table', title='W',
+            config={'display': 'default'}, position={'x': 0, 'y': 0, 'w': 6, 'h': 4},
+        )
+        renamed = AnalyticsDashboard.objects.create(
+            name='Payment Analytics', description='Paiements par commune', is_public=True, created_by=admin,
+            layout_config=layout,
+        )
+        call_command('seed_analytics_dashboards', stdout=open(os.devnull, 'w'))
+        for dashboard in empty:
+            dashboard.refresh_from_db()
+            self.assertIsNotNone(dashboard.validity_to, dashboard.name)
+        for dashboard in (filled, renamed):
+            dashboard.refresh_from_db()
+            self.assertIsNone(dashboard.validity_to, dashboard.description)
+        admin_listing = Query().resolve_analytics_dashboards(_info(admin))
+        self.assertFalse(admin_listing.filter(pk__in=[d.pk for d in empty]).exists())
+
+
+class DashboardEditingTest(TestCase):
+    """A holder of 200004 creates and edits their own dashboards; 200005 is
+    needed to make one public."""
+
+    def setUp(self):
+        cache.clear()
+        self.marker = _marker()
+        self.editor = _role_user(f'an_ed_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT])
+        self.sharer = _role_user(f'an_ed_sh_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT, SHARE])
+        self.viewer = _role_user(f'an_ed_view_{self.marker}', [VIEW])
+        self.other = _role_user(f'an_ed_other_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT])
+        Individual(
+            first_name='E', last_name=self.marker, dob=datetime.date(1990, 1, 1), json_ext={},
+        ).save(user=self.editor)
+        self.public_query = _saved_query(self.other, name='Public', is_public=True, query_config={
+            'filters': {'last_name': {'operator': 'exact', 'value': self.marker}},
+            'aggregations': {'n': {'function': 'count', 'field': 'id'}},
+        })
+        self.private_query = _saved_query(self.other, name='Private')
+
+    def _create(self, user, **fields):
+        data = dict(name='Mon tableau', description=None, is_public=False)
+        data.update(fields)
+        return CreateAnalyticsDashboardMutation.mutate(None, _info(user), SimpleNamespace(**data)).dashboard
+
+    def _add_widget(self, user, dashboard, query, **extra):
+        data = dict(widget_type='bar_chart', title='Nombre')
+        data.update(extra)
+        return AddAnalyticsWidgetMutation.mutate(
+            None, _info(user), _relay_id('AnalyticsDashboardType', dashboard.id),
+            _relay_id('AnalyticsQueryType', query.id), **data,
+        ).widget
+
+    def test_editor_creates_a_private_dashboard_they_can_edit(self):
+        dashboard = self._create(self.editor)
+        self.assertEqual(dashboard.created_by_id, self.editor.id)
+        self.assertFalse(dashboard.is_public)
+        self.assertFalse(dashboard.is_default)
+        self.assertTrue(_can_edit_dashboard(self.editor, dashboard))
+        listed = Query().resolve_analytics_dashboards(_info(self.editor))
+        self.assertTrue(listed.filter(pk=dashboard.pk).exists())
+        self.assertFalse(Query().resolve_analytics_dashboards(_info(self.viewer)).filter(pk=dashboard.pk).exists())
+
+    def test_create_without_the_dashboard_right_is_refused(self):
+        user = _role_user(f'an_ed_none_{self.marker}', [VIEW, QUERY])
+        with self.assertRaises(PermissionDenied):
+            self._create(user)
+
+    def test_public_dashboard_requires_the_share_right(self):
+        with self.assertRaises(PermissionDenied):
+            self._create(self.editor, is_public=True)
+        self.assertTrue(self._create(self.sharer, is_public=True).is_public)
+
+    def test_sharing_an_existing_dashboard_requires_the_share_right(self):
+        dashboard = self._create(self.editor)
+        with self.assertRaises(PermissionDenied):
+            UpdateAnalyticsDashboardMutation.mutate(
+                None, _info(self.editor), str(dashboard.id),
+                SimpleNamespace(name='Mon tableau', description=None, is_public=True),
+            )
+        dashboard.refresh_from_db()
+        self.assertFalse(dashboard.is_public)
+        shared = self._create(self.sharer)
+        UpdateAnalyticsDashboardMutation.mutate(
+            None, _info(self.sharer), _relay_id('AnalyticsDashboardType', shared.id),
+            SimpleNamespace(name='Partagé', description='d', is_public=True),
+        )
+        shared.refresh_from_db()
+        self.assertEqual((shared.name, shared.is_public), ('Partagé', True))
+
+    def test_editing_another_users_dashboard_is_refused(self):
+        dashboard = self._create(self.editor)
+        with self.assertRaises(PermissionDenied):
+            UpdateAnalyticsDashboardMutation.mutate(
+                None, _info(self.other), str(dashboard.id),
+                SimpleNamespace(name='X', description=None, is_public=None),
+            )
+        with self.assertRaises(PermissionDenied):
+            self._add_widget(self.other, dashboard, self.public_query)
+
+    @override_settings(IS_TESTING=False)
+    def test_widget_from_a_public_query_is_shown_to_viewers_of_a_public_dashboard(self):
+        # IS_TESTING=False makes core's pre_save model validation raise, as it does in service.
+        dashboard = self._create(self.sharer, is_public=True)
+        widget = self._add_widget(self.sharer, dashboard, self.public_query)
+        self.assertEqual(widget.position, {'x': 0, 'y': 0, 'w': 6, 'h': 4})
+        self.assertEqual(widget.config, {'display': 'default'})
+        UpdateAnalyticsDashboardMutation.mutate(
+            None, _info(self.sharer), str(dashboard.id),
+            SimpleNamespace(name='Renommé', description='', is_public=None),
+        )
+        with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
+            result = Query().resolve_execute_analytics_widget(
+                _info(self.viewer), _relay_id('AnalyticsWidgetType', widget.id),
+            )
+        self.assertEqual(result.data, [{'n': 1}])
+
+    def test_new_widget_goes_below_the_existing_ones(self):
+        dashboard = self._create(self.editor)
+        self._add_widget(self.editor, dashboard, self.public_query, position='{"x": 2, "y": 1, "w": 4, "h": 3}')
+        widget = self._add_widget(self.editor, dashboard, self.public_query, widget_type='TABLE')
+        self.assertEqual(widget.widget_type, 'table')
+        self.assertEqual(widget.position, {'x': 0, 'y': 4, 'w': 6, 'h': 4})
+
+    def test_another_users_private_query_cannot_be_added(self):
+        dashboard = self._create(self.editor)
+        with self.assertRaises(PermissionDenied):
+            self._add_widget(self.editor, dashboard, self.private_query)
+        self.assertFalse(AnalyticsWidget.objects.filter(dashboard=dashboard).exists())
+
+    def test_unsupported_widget_type_is_refused(self):
+        dashboard = self._create(self.editor)
+        with self.assertRaises(ValueError):
+            self._add_widget(self.editor, dashboard, self.public_query, widget_type='map')
+
+    @override_settings(IS_TESTING=False)
+    def test_removed_widget_leaves_the_dashboard(self):
+        dashboard = self._create(self.editor)
+        kept = self._add_widget(self.editor, dashboard, self.public_query, title='Gardé')
+        removed = self._add_widget(self.editor, dashboard, self.public_query, title='Retiré')
+        with self.assertRaises(PermissionDenied):
+            DeleteAnalyticsWidgetMutation.mutate(None, _info(self.other), str(removed.id))
+        DeleteAnalyticsWidgetMutation.mutate(
+            None, _info(self.editor), _relay_id('AnalyticsWidgetType', removed.id),
+        )
+        result = graphene.Schema(query=Query, mutation=Mutation).execute(
+            '{ analyticsDashboard(id: "%s") { canEdit widgets { edges { node { title } } } } }' % dashboard.id,
+            context_value=SimpleNamespace(user=self.editor),
+        )
+        self.assertIsNone(result.errors)
+        titles = [edge['node']['title'] for edge in result.data['analyticsDashboard']['widgets']['edges']]
+        self.assertEqual(titles, [kept.title])
+        self.assertTrue(result.data['analyticsDashboard']['canEdit'])
+
+    @override_settings(IS_TESTING=False)
+    def test_deleted_dashboard_and_its_widgets_are_retired(self):
+        dashboard = self._create(self.editor)
+        widget = self._add_widget(self.editor, dashboard, self.public_query)
+        DeleteAnalyticsDashboardMutation.mutate(None, _info(self.editor), str(dashboard.id))
+        dashboard.refresh_from_db()
+        widget.refresh_from_db()
+        self.assertIsNotNone(dashboard.validity_to)
+        self.assertIsNotNone(widget.validity_to)
+        with self.assertRaises(AnalyticsDashboard.DoesNotExist):
+            Query().resolve_analytics_dashboard(_info(self.editor), str(dashboard.id))
+
+    def test_default_dashboard_cannot_be_deleted(self):
+        dashboard = self._create(self.editor)
+        AnalyticsDashboard.objects.filter(pk=dashboard.pk).update(is_default=True)
+        with self.assertRaises(ValueError):
+            DeleteAnalyticsDashboardMutation.mutate(None, _info(self.editor), str(dashboard.id))
+
+    def test_graphql_exposes_the_dashboard_mutations(self):
+        schema = graphene.Schema(query=Query, mutation=Mutation)
+        names = set(schema.get_mutation_type().fields)
+        self.assertTrue({
+            'createAnalyticsDashboard', 'updateAnalyticsDashboard', 'deleteAnalyticsDashboard',
+            'addAnalyticsWidget', 'deleteAnalyticsWidget',
+        } <= names)
 
 
 class SeedCommandTest(TestCase):
