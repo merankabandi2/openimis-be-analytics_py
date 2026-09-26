@@ -52,6 +52,15 @@ RETIRED_QUERIES = [
     },
 ]
 
+# Dashboards that earlier versions created at startup, with no widget. Reseeding
+# retires (sets validity_to on) a row that still has this name and description,
+# is not the default dashboard and holds no active widget.
+RETIRED_DASHBOARDS = [
+    ('System Overview', 'Key system metrics'),
+    ('Beneficiary Analytics', 'Beneficiary management analytics'),
+    ('Payment Analytics', 'Payment tracking and analysis'),
+]
+
 DEFAULT_WIDGETS = [
     {
         'query_name': 'Bénéficiaires par programme',
@@ -124,6 +133,7 @@ class Command(BaseCommand):
                     q.save(update_fields=['entity_type', 'query_config', 'is_public'])
 
         retired = 0
+        retired_dashboards = 0
         for q_def in RETIRED_QUERIES:
             for q in AnalyticsQuery.objects.filter(
                 name=q_def['name'], entity_type=q_def['entity_type'], validity_to__isnull=True,
@@ -132,6 +142,15 @@ class Command(BaseCommand):
                     q.validity_to = datetime.datetime.now()
                     q.save(update_fields=['validity_to'])
                     retired += 1
+
+        for name, description in RETIRED_DASHBOARDS:
+            for dashboard in AnalyticsDashboard.objects.filter(
+                name=name, description=description, is_default=False, validity_to__isnull=True,
+            ):
+                if not dashboard.widgets.filter(validity_to__isnull=True).exists():
+                    dashboard.validity_to = datetime.datetime.now()
+                    dashboard.save(update_fields=['validity_to'])
+                    retired_dashboards += 1
 
         # Seed dashboard
         dash, dash_created = AnalyticsDashboard.objects.get_or_create(
@@ -175,5 +194,6 @@ class Command(BaseCommand):
             f'Seed complete: {created_queries} new queries, '
             f'{created_widgets} new widgets, '
             f'{retired} retired queries, '
+            f'{retired_dashboards} retired dashboards, '
             f'{1 if dash_created else 0} new dashboards'
         ))

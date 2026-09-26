@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import os
 import pandas as pd
 from django.apps import apps
@@ -9,14 +8,13 @@ from typing import Dict, List, Any, NamedTuple
 
 from django.core.exceptions import PermissionDenied
 
-from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, AnalyticsExport
-
-logger = logging.getLogger(__name__)
-
 
 class QueryResult(NamedTuple):
     rows: List[Dict]
     truncated: bool
+    # True when grievance tickets matching the filters are left out because the
+    # query reads fields the user may not see on them.
+    restricted_rows_withheld: bool = False
 
 
 # Filter operators accepted in a query config, mapped to the Django lookup they
@@ -163,16 +161,50 @@ class QueryBuilderService:
     @classmethod
     def _scoped_queryset(cls, entity_type, model, user, referenced_fields):
         """Rows of `model` the user may read: never soft-deleted rows, then the
-        same row security as the owning module's own list queries."""
+        same row security as the owning module's own list queries.
+
+        Returns (queryset, withheld). `withheld` is None, or for grievances the
+        tickets the user can see but that are left out because the query
+        references fields hidden on them.
+        """
         queryset = model.objects.filter(is_deleted=False)
         if entity_type == 'grievance':
             return cls._scope_grievance(queryset, user, referenced_fields)
         if not cls._row_security_applies(user):
-            return queryset
+            return queryset, None
         if entity_type == 'payment':
-            from individual.models import Individual
+            return cls._scope_payments(queryset, user), None
+        return model.get_queryset(queryset, user), None
+
+    @classmethod
+    def _scope_payments(cls, queryset, user):
+        """Payments of the individuals Individual.get_queryset lets the user read.
+
+        That rule admits an individual whose location, or the location of one of
+        its groups, is allowed or empty. Joining every individual to its groups
+        costs a scan of both tables, so when fewer locations are denied than
+        allowed the same rule is applied as its complement: only payments of
+        individuals located in a denied location and in no admitted group are
+        dropped, and none when no location is denied.
+        """
+        from django.db.models import Exists, OuterRef
+        from individual.models import Individual, GroupIndividual
+        from location.models import Location, LocationManager
+        core_user = getattr(user, '_u', user)
+        manager = LocationManager()
+        allowed_locations = manager.build_user_location_filter_query(core_user, prefix='id')
+        if not allowed_locations:
             return queryset.filter(individual__in=Individual.get_queryset(None, user))
-        return model.get_queryset(queryset, user)
+        denied = list(Location.objects.exclude(allowed_locations).values_list('id', flat=True))
+        if not denied:
+            return queryset
+        if len(denied) * 2 > Location.objects.count():
+            return queryset.filter(individual__in=Individual.get_queryset(None, user))
+        admitted_group = GroupIndividual.objects.filter(
+            individual=OuterRef('pk'), group__isnull=False,
+        ).filter(manager.build_user_location_filter_query(core_user, prefix='group__location'))
+        hidden = Individual.objects.filter(location_id__in=denied).exclude(Exists(admitted_group))
+        return queryset.exclude(Exists(hidden.filter(pk=OuterRef('individual_id'))))
 
     @classmethod
     def _scope_grievance(cls, queryset, user, referenced_fields):
@@ -183,6 +215,10 @@ class QueryBuilderService:
         (restricted category or flag) is kept only when every referenced field is
         among the category's visible fields, which mirrors TicketGQLType's field
         masking.
+
+        Returns (queryset, withheld): `withheld` holds the tickets the user can
+        see in restricted form but that are dropped for the referenced fields,
+        or is None when no such rule applies.
         """
         from django.db.models import Q
         from grievance_social_protection.apps import TicketConfig
@@ -191,10 +227,16 @@ class QueryBuilderService:
         try:
             from grievance_social_protection.access_control import GrievanceAccessControl as access
         except ImportError:
-            return queryset
+            return queryset, None
 
-        queryset = access.filter_ticket_queryset(queryset, user)
+        readable = access.filter_ticket_queryset(queryset, user)
+        queryset = readable
         referenced = cls._canonical_ticket_fields(referenced_fields)
+        withheld_q = None
+
+        def _withhold(q):
+            nonlocal withheld_q
+            withheld_q = q if withheld_q is None else withheld_q | q
 
         covered_categories = []
         for category in (TicketConfig.processed_categories or {}):
@@ -207,6 +249,7 @@ class QueryBuilderService:
                 covered_categories.append(category)
             else:
                 queryset = queryset.exclude(category=category)
+                _withhold(Q(category=category))
 
         flag_q = getattr(access, '_flag_stored_q', None) or (lambda flag: Q(flags__icontains=flag))
         for flag, info in (TicketConfig.processed_flags or {}).items():
@@ -216,7 +259,8 @@ class QueryBuilderService:
             if level in (access.ACCESS_FULL, access.ACCESS_READ):
                 continue
             queryset = queryset.exclude(flag_q(flag) & ~Q(category__in=covered_categories))
-        return queryset
+            _withhold(flag_q(flag) & ~Q(category__in=covered_categories))
+        return queryset, (readable.filter(withheld_q) if withheld_q is not None else None)
 
     @classmethod
     def _canonical_ticket_fields(cls, names):
@@ -398,9 +442,12 @@ class QueryBuilderService:
         if not grouped:
             referenced |= set(fields) if fields else cls._concrete_field_names(model)
 
-        queryset = cls._scoped_queryset(entity_type, model, user, referenced)
+        queryset, withheld = cls._scoped_queryset(entity_type, model, user, referenced)
         for field, condition in filters:
             queryset = queryset.filter(cls._filter_q(field, condition))
+            if withheld is not None:
+                withheld = withheld.filter(cls._filter_q(field, condition))
+        restricted_rows_withheld = withheld is not None and withheld.exists()
 
         if max_rows is not None:
             limit = max_rows
@@ -446,7 +493,9 @@ class QueryBuilderService:
             if isinstance(v, decimal.Decimal):
                 return float(v)
             return v
-        return QueryResult([{k: _coerce(v) for k, v in row.items()} for row in rows], truncated)
+        return QueryResult(
+            [{k: _coerce(v) for k, v in row.items()} for row in rows], truncated, restricted_rows_withheld,
+        )
 
     @classmethod
     def _get_orm_entity_fields(cls, entity_type: str) -> List[Dict]:
@@ -512,36 +561,3 @@ class ExportService:
         filepath = os.path.join(cls.export_dir(), f"{filename}.csv")
         df.to_csv(filepath, index=False)
         return filepath
-
-
-class DashboardService:
-    """Service to manage analytics dashboards."""
-
-    @classmethod
-    def create_default_dashboards(cls):
-        """Create the built-in dashboards, owned by the Admin account.
-
-        They are not flagged `is_default`: the default dashboard is the one the
-        seed_analytics_dashboards command creates.
-        """
-        from django.contrib.auth import get_user_model
-        system_user = get_user_model().objects.filter(username__iexact='admin').first()
-        if not system_user:
-            logger.warning("No 'admin' user: built-in analytics dashboards not created")
-            return
-
-        for name, desc in [
-            ("System Overview", "Key system metrics"),
-            ("Beneficiary Analytics", "Beneficiary management analytics"),
-            ("Payment Analytics", "Payment tracking and analysis"),
-        ]:
-            AnalyticsDashboard.objects.get_or_create(
-                name=name,
-                defaults={
-                    'description': desc,
-                    'is_public': True,
-                    'is_default': False,
-                    'created_by': system_user,
-                    'layout_config': {"columns": 12, "rowHeight": 100},
-                },
-            )

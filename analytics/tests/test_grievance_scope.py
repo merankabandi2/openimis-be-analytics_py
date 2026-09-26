@@ -35,7 +35,9 @@ GRIEVANCE_CONFIG = {
 }
 
 
-class GrievanceScopeTest(TestCase):
+class GrievanceFixture(TestCase):
+    """Three tickets: a public one, a secret one, and a public one flagged hidden."""
+
     def setUp(self):
         patcher = mock.patch.multiple(TicketConfig, **GRIEVANCE_CONFIG)
         patcher.start()
@@ -60,6 +62,8 @@ class GrievanceScopeTest(TestCase):
         ), user).rows
         return {row['category']: row['n'] for row in rows}
 
+
+class GrievanceScopeTest(GrievanceFixture):
     def test_user_without_ticket_read_right_is_refused(self):
         user = _role_user(f'an_grv_none_{self.marker}', [200002])
         with self.assertRaises(PermissionDenied):
@@ -96,3 +100,60 @@ class GrievanceScopeTest(TestCase):
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
             result = QueryBuilderService.execute_query('grievance', self._config(fields=['title']), user, max_rows=10)
         self.assertEqual(result.rows, [{'title': 'public title'}])
+
+
+class WithheldRestrictedTicketsTest(GrievanceFixture):
+    """A query that reads fields hidden on restricted tickets drops those tickets;
+    the result says so instead of looking like an empty match."""
+
+    def _restricted_user(self, rights=(SECRET_RESTRICTED_READ, HIDDEN_FLAG_RESTRICTED_READ)):
+        return _role_user(f'an_grv_wh_{_marker()}', [200002, TICKET_READ, *rights])
+
+    def test_ungrouped_query_on_a_restricted_category_reports_the_withheld_tickets(self):
+        result = _run('grievance', self._config(
+            filters={
+                'channel': {'operator': 'exact', 'value': self.marker},
+                'category': {'operator': 'exact', 'value': 'secret'},
+            },
+            limit=1,
+        ), self._restricted_user())
+        self.assertEqual(result.rows, [])
+        self.assertTrue(result.restricted_rows_withheld)
+
+    def test_query_on_visible_fields_withholds_nothing(self):
+        result = _run('grievance', self._config(
+            filters={
+                'channel': {'operator': 'exact', 'value': self.marker},
+                'category': {'operator': 'exact', 'value': 'secret'},
+            },
+            fields=['category', 'status'],
+        ), self._restricted_user())
+        self.assertEqual(result.rows, [{'category': 'secret', 'status': 'OPEN'}])
+        self.assertFalse(result.restricted_rows_withheld)
+
+    def test_filters_that_match_no_withheld_ticket_report_nothing(self):
+        result = _run('grievance', self._config(
+            filters={
+                'channel': {'operator': 'exact', 'value': self.marker},
+                'title': {'operator': 'exact', 'value': 'no such title'},
+            },
+        ), self._restricted_user())
+        self.assertEqual(result.rows, [])
+        self.assertFalse(result.restricted_rows_withheld)
+
+    def test_tickets_the_user_cannot_see_are_not_reported(self):
+        user = _role_user(f'an_grv_wh_none_{_marker()}', [200002, TICKET_READ])
+        result = _run('grievance', self._config(
+            filters={
+                'channel': {'operator': 'exact', 'value': self.marker},
+                'category': {'operator': 'exact', 'value': 'secret'},
+            },
+        ), user)
+        self.assertEqual(result.rows, [])
+        self.assertFalse(result.restricted_rows_withheld)
+
+    def test_full_reader_has_nothing_withheld(self):
+        user = _role_user(f'an_grv_wh_full_{_marker()}', [200002, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
+        result = _run('grievance', self._config(), user)
+        self.assertEqual(len(result.rows), 3)
+        self.assertFalse(result.restricted_rows_withheld)
