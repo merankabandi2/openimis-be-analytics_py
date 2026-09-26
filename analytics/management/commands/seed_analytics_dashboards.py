@@ -52,9 +52,8 @@ RETIRED_QUERIES = [
     },
 ]
 
-# Dashboards that earlier versions created at startup, with no widget. Reseeding
-# retires (sets validity_to on) a row that still has this name and description,
-# is not the default dashboard and holds no active widget.
+# Widgetless dashboards that reseeding retires (sets validity_to on): a row with
+# this name and description that is not the default and holds no active widget.
 RETIRED_DASHBOARDS = [
     ('System Overview', 'Key system metrics'),
     ('Beneficiary Analytics', 'Beneficiary management analytics'),
