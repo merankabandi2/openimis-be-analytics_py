@@ -1,8 +1,4 @@
-import logging
-
 from django.apps import AppConfig
-
-logger = logging.getLogger(__name__)
 
 MODULE_NAME = "analytics"
 
@@ -41,11 +37,6 @@ class AnalyticsConfig(AppConfig):
         from core.models import ModuleConfiguration
         cfg = ModuleConfiguration.get_or_default(MODULE_NAME, DEFAULT_CFG)
         self.__load_config(cfg)
-        try:
-            from analytics.services import DashboardService
-            DashboardService.create_default_dashboards()
-        except Exception as exc:  # the database may not be migrated yet
-            logger.warning("Built-in analytics dashboards not created: %s", exc)
 
     @classmethod
     def __load_config(cls, cfg):
