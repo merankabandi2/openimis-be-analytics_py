@@ -127,19 +127,53 @@ class WithheldRestrictedTicketsTest(GrievanceFixture):
                 'category': {'operator': 'exact', 'value': 'secret'},
             },
             fields=['category', 'status'],
-        ), self._restricted_user())
+        ), self._restricted_user(rights=(SECRET_RESTRICTED_READ,)))
         self.assertEqual(result.rows, [{'category': 'secret', 'status': 'OPEN'}])
         self.assertFalse(result.restricted_rows_withheld)
 
-    def test_filters_that_match_no_withheld_ticket_report_nothing(self):
+    def test_visible_filters_that_match_no_withheld_ticket_report_nothing(self):
         result = _run('grievance', self._config(
             filters={
                 'channel': {'operator': 'exact', 'value': self.marker},
-                'title': {'operator': 'exact', 'value': 'no such title'},
+                'status': {'operator': 'exact', 'value': 'CLOSED'},
             },
-        ), self._restricted_user())
+        ), self._restricted_user(rights=(SECRET_RESTRICTED_READ,)))
         self.assertEqual(result.rows, [])
         self.assertFalse(result.restricted_rows_withheld)
+
+    def _flag_for(self, user, **hidden_filters):
+        filters = {'channel': {'operator': 'exact', 'value': self.marker}, **hidden_filters}
+        result = _run('grievance', self._config(
+            filters=filters,
+            group_by=['category'], aggregations={'n': {'function': 'count', 'field': 'id'}},
+        ), user)
+        return result.rows, result.restricted_rows_withheld
+
+    def test_filter_on_a_field_hidden_in_the_category_does_not_change_the_flag(self):
+        user = self._restricted_user(rights=(SECRET_RESTRICTED_READ,))
+        category = {'category': {'operator': 'exact', 'value': 'secret'}}
+        for field, hit, miss in (('description', 'sensit', 'zzzz'), ('title', 'secret title', 'no such title')):
+            with self.subTest(field=field):
+                matching = self._flag_for(user, **category, **{field: {'operator': 'contains', 'value': hit}})
+                other = self._flag_for(user, **category, **{field: {'operator': 'contains', 'value': miss}})
+                self.assertEqual(matching, other)
+                self.assertEqual(matching, ([], True))
+
+    def test_filter_on_the_ticket_id_does_not_change_the_flag(self):
+        user = self._restricted_user(rights=(SECRET_RESTRICTED_READ,))
+        secret = Ticket.objects.get(channel=self.marker, category='secret')
+        pinned = {'id': {'operator': 'exact', 'value': str(secret.id)}}
+        matching = self._flag_for(user, **pinned, description={'operator': 'startswith', 'value': 'sens'})
+        other = self._flag_for(user, **pinned, description={'operator': 'startswith', 'value': 'zzzz'})
+        self.assertEqual(matching, other)
+
+    def test_filter_on_a_ticket_withheld_for_a_flag_does_not_change_the_flag(self):
+        user = self._restricted_user(rights=(HIDDEN_FLAG_RESTRICTED_READ,))
+        category = {'category': {'operator': 'exact', 'value': 'public'}}
+        matching = self._flag_for(user, **category, description={'operator': 'contains', 'value': 'sensit'})
+        other = self._flag_for(user, **category, description={'operator': 'contains', 'value': 'zzzz'})
+        self.assertEqual(matching[1], other[1])
+        self.assertTrue(matching[1])
 
     def test_tickets_the_user_cannot_see_are_not_reported(self):
         user = _role_user(f'an_grv_wh_none_{_marker()}', [200002, TICKET_READ])

@@ -12,8 +12,10 @@ from django.core.exceptions import PermissionDenied
 class QueryResult(NamedTuple):
     rows: List[Dict]
     truncated: bool
-    # True when grievance tickets matching the filters are left out because the
-    # query reads fields the user may not see on them.
+    # True when grievance tickets are left out because the query reads fields
+    # the user may not see on them, and some of those tickets match the filters
+    # on fields the user does see there. Filters on hidden fields count as
+    # matching, so the flag can report tickets the full filter would exclude.
     restricted_rows_withheld: bool = False
 
 
@@ -163,9 +165,10 @@ class QueryBuilderService:
         """Rows of `model` the user may read: never soft-deleted rows, then the
         same row security as the owning module's own list queries.
 
-        Returns (queryset, withheld). `withheld` is None, or for grievances the
-        tickets the user can see but that are left out because the query
-        references fields hidden on them.
+        Returns (queryset, withheld). `withheld` is None, or for grievances a
+        (readable, parts) pair describing the tickets the user can see but that
+        are left out because the query references fields hidden on them (see
+        _scope_grievance).
         """
         queryset = model.objects.filter(is_deleted=False)
         if entity_type == 'grievance':
@@ -216,9 +219,12 @@ class QueryBuilderService:
         among the category's visible fields, which mirrors TicketGQLType's field
         masking.
 
-        Returns (queryset, withheld): `withheld` holds the tickets the user can
-        see in restricted form but that are dropped for the referenced fields,
-        or is None when no such rule applies.
+        Returns (queryset, withheld). `withheld` is None when no ticket is
+        dropped this way, else (readable, parts): `readable` is the queryset of
+        tickets the user can see, and each part pairs a Q selecting dropped
+        tickets with the canonical names of the fields the user sees on them.
+        A restricted category exposes its visible fields; a ticket dropped for
+        a flag exposes none.
         """
         from django.db.models import Q
         from grievance_social_protection.apps import TicketConfig
@@ -232,24 +238,23 @@ class QueryBuilderService:
         readable = access.filter_ticket_queryset(queryset, user)
         queryset = readable
         referenced = cls._canonical_ticket_fields(referenced_fields)
-        withheld_q = None
-
-        def _withhold(q):
-            nonlocal withheld_q
-            withheld_q = q if withheld_q is None else withheld_q | q
+        parts = []
 
         covered_categories = []
+        withheld_categories = []
         for category in (TicketConfig.processed_categories or {}):
             if not access.has_category_restrictions(category):
                 continue
             visible = access.get_visible_fields(user, category)
             if visible is None:
                 continue
-            if referenced <= cls._canonical_ticket_fields(visible):
+            visible = cls._canonical_ticket_fields(visible)
+            if referenced <= visible:
                 covered_categories.append(category)
             else:
                 queryset = queryset.exclude(category=category)
-                _withhold(Q(category=category))
+                withheld_categories.append(category)
+                parts.append((Q(category=category), visible))
 
         flag_q = getattr(access, '_flag_stored_q', None) or (lambda flag: Q(flags__icontains=flag))
         for flag, info in (TicketConfig.processed_flags or {}).items():
@@ -259,8 +264,33 @@ class QueryBuilderService:
             if level in (access.ACCESS_FULL, access.ACCESS_READ):
                 continue
             queryset = queryset.exclude(flag_q(flag) & ~Q(category__in=covered_categories))
-            _withhold(flag_q(flag) & ~Q(category__in=covered_categories))
-        return queryset, (readable.filter(withheld_q) if withheld_q is not None else None)
+            # A flagged ticket of a withheld category shows that category's
+            # visible fields, so its part above already accounts for it.
+            parts.append((
+                flag_q(flag) & ~Q(category__in=covered_categories + withheld_categories),
+                frozenset(),
+            ))
+        return queryset, ((readable, parts) if parts else None)
+
+    @classmethod
+    def _withheld_tickets_match(cls, withheld, filters):
+        """True when some withheld ticket matches the filters the user can
+        evaluate on it.
+
+        A filter applies to a part only when its field is visible there, so the
+        answer never depends on a field value hidden from the user; a filter on
+        a hidden field is treated as matching.
+        """
+        if withheld is None:
+            return False
+        readable, parts = withheld
+        match = None
+        for condition, visible in parts:
+            for field, filter_condition in filters:
+                if cls._canonical_ticket_fields([field]) <= visible:
+                    condition &= cls._filter_q(field, filter_condition)
+            match = condition if match is None else match | condition
+        return readable.filter(match).exists()
 
     @classmethod
     def _canonical_ticket_fields(cls, names):
@@ -445,9 +475,7 @@ class QueryBuilderService:
         queryset, withheld = cls._scoped_queryset(entity_type, model, user, referenced)
         for field, condition in filters:
             queryset = queryset.filter(cls._filter_q(field, condition))
-            if withheld is not None:
-                withheld = withheld.filter(cls._filter_q(field, condition))
-        restricted_rows_withheld = withheld is not None and withheld.exists()
+        restricted_rows_withheld = cls._withheld_tickets_match(withheld, filters)
 
         if max_rows is not None:
             limit = max_rows

@@ -191,8 +191,8 @@ class QueryResultType(graphene.ObjectType):
     row_count = graphene.Int()
     # True when more rows matched than the row limit returned.
     truncated = graphene.Boolean()
-    # True when grievance tickets matching the filters are left out because the
-    # query reads fields the user may not see on them.
+    # True when grievance tickets are left out because the query reads fields
+    # the user may not see on them; see QueryResult.restricted_rows_withheld.
     restricted_rows_withheld = graphene.Boolean()
     execution_time = graphene.Float()
 
