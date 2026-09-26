@@ -38,6 +38,20 @@ def _can_edit_dashboard(user, dashboard):
     return user.is_superuser or dashboard.created_by_id == user.id
 
 
+def _owns_query(user, query):
+    return user.is_superuser or query.created_by_id == user.id
+
+
+def _can_edit_query(user, query):
+    """Whether update/delete of this saved query would be accepted for `user`."""
+    from analytics.apps import AnalyticsConfig
+    if not user or not getattr(user, 'id', None):
+        return False
+    if not user.has_perms(AnalyticsConfig.gql_analytics_query_update_perms):
+        return False
+    return _owns_query(user, query)
+
+
 def _check_share_perms(user):
     from analytics.apps import AnalyticsConfig
     if not user.has_perms(AnalyticsConfig.gql_analytics_dashboard_share_perms):
@@ -91,6 +105,8 @@ def _resolve_pk(raw_id):
 
 
 class AnalyticsQueryType(DjangoObjectType):
+    can_edit = graphene.Boolean()
+
     class Meta:
         model = AnalyticsQuery
         interfaces = (graphene.relay.Node,)
@@ -100,6 +116,9 @@ class AnalyticsQueryType(DjangoObjectType):
             'is_public': ['exact'],
         }
         connection_class = ExtendedConnection
+
+    def resolve_can_edit(self, info):
+        return _can_edit_query(info.context.user, self)
 
 
 class AnalyticsDashboardType(DjangoObjectType):
@@ -300,7 +319,7 @@ class UpdateAnalyticsQueryMutation(graphene.Mutation):
         user = info.context.user
         _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
         obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
-        if obj.created_by != user and not user.is_superuser:
+        if not _owns_query(user, obj):
             raise PermissionDenied("You can only edit your own queries")
         if input.is_public and not obj.is_public:
             _check_share_perms(user)
@@ -328,7 +347,7 @@ class DeleteAnalyticsQueryMutation(graphene.Mutation):
         user = info.context.user
         _check_perms(user, AnalyticsConfig.gql_analytics_query_update_perms)
         obj = AnalyticsQuery.objects.get(pk=_resolve_pk(id), validity_to__isnull=True)
-        if obj.created_by != user and not user.is_superuser:
+        if not _owns_query(user, obj):
             raise PermissionDenied("You can only delete your own queries")
         if AnalyticsWidget.objects.filter(query=obj, validity_to__isnull=True).exists():
             raise ValueError("This query is used by a dashboard widget and cannot be deleted")

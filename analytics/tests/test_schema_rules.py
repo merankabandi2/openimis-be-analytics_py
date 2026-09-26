@@ -18,6 +18,7 @@ from individual.models import Individual
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsDashboard, AnalyticsExport, AnalyticsQuery, AnalyticsWidget
 from analytics.schema import (
+    AnalyticsQueryType,
     CreateAnalyticsQueryMutation,
     DeleteAnalyticsQueryMutation,
     ExportAnalyticsDataMutation,
@@ -114,6 +115,22 @@ class SavedQueryMutationTest(TestCase):
             DeleteAnalyticsQueryMutation.mutate(None, _info(self.other), str(obj.id))
         obj.refresh_from_db()
         self.assertIsNone(obj.validity_to)
+
+    def test_can_edit_is_true_only_for_the_owner(self):
+        obj = _saved_query(self.owner, is_public=True)
+        self.assertTrue(AnalyticsQueryType.resolve_can_edit(obj, _info(self.owner)))
+        self.assertFalse(AnalyticsQueryType.resolve_can_edit(obj, _info(self.other)))
+
+    def test_can_edit_needs_the_update_right(self):
+        reader = _role_user(f'an_reader_{self.marker}', [QUERY, CREATE])
+        obj = _saved_query(reader)
+        self.assertFalse(AnalyticsQueryType.resolve_can_edit(obj, _info(reader)))
+
+    def test_can_edit_holds_for_a_superuser_on_any_query(self):
+        admin = create_test_interactive_user(username=f'an_admin_{self.marker}')
+        self.assertTrue(admin.is_superuser)
+        obj = _saved_query(self.owner, is_public=True)
+        self.assertTrue(AnalyticsQueryType.resolve_can_edit(obj, _info(admin)))
 
     def test_delete_of_a_query_used_by_a_widget_is_refused(self):
         obj = _saved_query(self.owner)
