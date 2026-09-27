@@ -5,7 +5,9 @@ from unittest import mock
 
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 
 from core.models import Role, RoleRight
 from core.test_helpers import create_test_interactive_user
@@ -118,6 +120,36 @@ class GroupingTest(OrmQueryTestCase):
         ), self.admin).rows
         self.assertEqual(rows[0], {'first_name': 'Bob', 'nb': 2})
 
+
+    def _grouped_sql(self, config):
+        with CaptureQueriesContext(connection) as ctx:
+            _run('individual', config, self.admin)
+        grouped = [q['sql'] for q in ctx.captured_queries if 'GROUP BY' in q['sql'].upper()]
+        self.assertEqual(len(grouped), 1, grouped)
+        return grouped[0]
+
+    def test_grouped_rows_without_order_by_are_ordered_by_the_group_fields(self):
+        sql = self._grouped_sql(self._config(measures=['count'], dimensions=['first_name']))
+        tail = sql.upper().rsplit('GROUP BY', 1)[1]
+        self.assertIn('ORDER BY', tail, sql)
+        self.assertIn('"FIRST_NAME"', tail.split('ORDER BY', 1)[1], sql)
+
+    def test_distinct_groups_without_order_by_are_ordered_by_the_group_fields(self):
+        with CaptureQueriesContext(connection) as ctx:
+            rows = _run('individual', self._config(group_by=['first_name']), self.admin).rows
+        distinct = [q['sql'] for q in ctx.captured_queries if 'SELECT DISTINCT' in q['sql'].upper()]
+        self.assertEqual(len(distinct), 1, distinct)
+        self.assertIn('ORDER BY', distinct[0].upper(), distinct[0])
+        self.assertEqual([row['first_name'] for row in rows], ['Alain', 'Alice', 'Bob'])
+
+    def test_configured_order_by_is_kept(self):
+        sql = self._grouped_sql(self._config(
+            group_by=['first_name'],
+            aggregations={'nb': {'function': 'count', 'field': 'id'}},
+            order_by=['-nb', 'first_name'],
+        ))
+        order = sql.upper().rsplit('ORDER BY', 1)[1]
+        self.assertIn('DESC', order.split(',')[0], sql)
 
 class FieldSelectionTest(OrmQueryTestCase):
     def test_selected_fields_are_the_only_columns(self):
