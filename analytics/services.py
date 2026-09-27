@@ -507,6 +507,10 @@ class QueryBuilderService:
                 queryset = queryset.values(*fields)
             if order_by:
                 queryset = queryset.order_by(*order_by)
+            elif group_by:
+                # Without an ORDER BY the database returns groups in any order, and
+                # the row limit keeps an arbitrary subset.
+                queryset = queryset.order_by(*group_by)
             rows = list(queryset[:limit + 1])
         truncated = len(rows) > limit
         rows = rows[:limit]
