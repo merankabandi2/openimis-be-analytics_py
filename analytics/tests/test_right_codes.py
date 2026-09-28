@@ -52,6 +52,10 @@ class AnalyticsRightCodesTest(SimpleTestCase):
         self.assertEqual(len(codes), len(ANALYTICS_PERMS))
         self.assertEqual(len(set(codes)), len(codes))
 
+    def test_analytics_rights_are_803001_to_803007(self):
+        codes = sorted(code for attr_codes in _analytics_codes().values() for code in attr_codes)
+        self.assertEqual(codes, list(range(803001, 803008)))
+
     def test_payment_cycle_rights_are_not_analytics_rights(self):
         payment_cycle = _declared_rights(apps.get_app_config('payment_cycle'))
         self.assertTrue(payment_cycle)

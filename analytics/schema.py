@@ -412,8 +412,8 @@ class AnalyticsDashboardInput(graphene.InputObjectType):
 
 
 class CreateAnalyticsDashboardMutation(graphene.Mutation):
-    """Create a dashboard owned by the caller (210004). A public dashboard also
-    needs the share right (210005)."""
+    """Create a dashboard owned by the caller (803004). A public dashboard also
+    needs the share right (803005)."""
 
     class Arguments:
         input = AnalyticsDashboardInput(required=True)

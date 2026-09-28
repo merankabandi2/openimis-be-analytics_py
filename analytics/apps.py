@@ -6,13 +6,13 @@ DEFAULT_CFG = {
     "analytics_max_export_rows": 100000,
     "analytics_max_query_rows": 10000,
     "analytics_cache_ttl": 300,  # 5 minutes
-    "gql_analytics_dashboards_perms": ["210001"],
-    "gql_analytics_query_perms": ["210002"],
-    "gql_analytics_export_perms": ["210003"],
-    "gql_analytics_dashboard_create_perms": ["210004"],
-    "gql_analytics_dashboard_share_perms": ["210005"],
-    "gql_analytics_query_create_perms": ["210006"],
-    "gql_analytics_query_update_perms": ["210007"],
+    "gql_analytics_dashboards_perms": ["803001"],
+    "gql_analytics_query_perms": ["803002"],
+    "gql_analytics_export_perms": ["803003"],
+    "gql_analytics_dashboard_create_perms": ["803004"],
+    "gql_analytics_dashboard_share_perms": ["803005"],
+    "gql_analytics_query_create_perms": ["803006"],
+    "gql_analytics_query_update_perms": ["803007"],
 }
 
 
