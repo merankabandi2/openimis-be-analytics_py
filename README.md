@@ -47,7 +47,7 @@ flag access rules.
 
 ## GraphQL Queries
 
-### analyticsQuery
+### executeAnalyticsQuery
 Execute a custom analytics query with filters and aggregations
 
 ### analyticsDashboards

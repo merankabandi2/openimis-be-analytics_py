@@ -65,7 +65,6 @@ class AnalyticsWidget(core_models.VersionedModel):
             ('pie_chart', 'Pie Chart'),
             ('table', 'Table'),
             ('metric', 'Single Metric'),
-            ('map', 'Geographic Map'),
         ]
     )
     title = models.CharField(max_length=255)

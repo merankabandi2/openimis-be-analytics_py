@@ -202,7 +202,6 @@ class Query(graphene.ObjectType):
         AnalyticsQueryType,
         orderBy=graphene.List(of_type=graphene.String),
     )
-    analytics_query = graphene.Field(AnalyticsQueryType, id=graphene.ID())
 
     analytics_dashboards = OrderedDjangoFilterConnectionField(
         AnalyticsDashboardType,
@@ -236,12 +235,6 @@ class Query(graphene.ObjectType):
         _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
         qs = AnalyticsQuery.objects.filter(validity_to__isnull=True)
         return _visible_to(qs, info.context.user)
-
-    def resolve_analytics_query(self, info, id):
-        from analytics.apps import AnalyticsConfig
-        _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
-        qs = _visible_to(AnalyticsQuery.objects.filter(validity_to__isnull=True), info.context.user)
-        return qs.get(pk=_resolve_pk(id))
 
     def resolve_analytics_dashboards(self, info, **kwargs):
         from analytics.apps import AnalyticsConfig
@@ -588,9 +581,10 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
         max_rows = AnalyticsConfig.analytics_max_export_rows
         result = QueryBuilderService.execute_query(entity_type, config, user, max_rows=max_rows)
         if result.truncated:
-            raise ValueError(
-                f"Export exceeds maximum rows ({max_rows}); add filters or grouping"
-            )
+            # Grouping cannot shorten a result that is already grouped.
+            _, group_by, _, _, _ = QueryBuilderService._normalise_config(config)
+            advice = "narrow the filters" if group_by else "add filters or grouping"
+            raise ValueError(f"Export exceeds maximum rows ({max_rows}); {advice}")
         results = result.rows
 
         timestamp = py_datetime.now().strftime("%Y%m%d_%H%M%S")

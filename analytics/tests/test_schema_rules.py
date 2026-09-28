@@ -21,6 +21,7 @@ from individual.models import Individual
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsDashboard, AnalyticsExport, AnalyticsQuery, AnalyticsWidget
 from analytics.schema import (
+    ADDABLE_WIDGET_TYPES,
     AddAnalyticsWidgetMutation,
     AnalyticsQueryType,
     CreateAnalyticsDashboardMutation,
@@ -239,8 +240,20 @@ class ExportTest(TestCase):
 
     def test_export_over_the_export_cap_is_refused(self):
         with mock.patch.object(AnalyticsConfig, 'analytics_max_export_rows', 2):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as refused:
                 self._export()
+        self.assertEqual(str(refused.exception), 'Export exceeds maximum rows (2); add filters or grouping')
+
+    def test_grouped_export_over_the_cap_asks_only_for_filters(self):
+        self.config = {
+            'filters': {'last_name': {'operator': 'exact', 'value': self.marker}},
+            'group_by': ['first_name'],
+            'aggregations': {'total': {'function': 'count', 'field': 'id'}},
+        }
+        with mock.patch.object(AnalyticsConfig, 'analytics_max_export_rows', 2):
+            with self.assertRaises(ValueError) as refused:
+                self._export()
+        self.assertEqual(str(refused.exception), 'Export exceeds maximum rows (2); narrow the filters')
 
 
 class ExcelExportTest(TestCase):
@@ -477,6 +490,15 @@ class DashboardEditingTest(TestCase):
         AnalyticsDashboard.objects.filter(pk=dashboard.pk).update(is_default=True)
         with self.assertRaises(ValueError):
             DeleteAnalyticsDashboardMutation.mutate(None, _info(self.editor), str(dashboard.id))
+
+    def test_stored_widget_types_are_the_addable_ones(self):
+        choices = {value for value, _ in AnalyticsWidget._meta.get_field('widget_type').choices}
+        self.assertEqual(choices, set(ADDABLE_WIDGET_TYPES))
+
+    def test_graphql_query_fields(self):
+        names = set(graphene.Schema(query=Query, mutation=Mutation).get_query_type().fields)
+        self.assertNotIn('analyticsQuery', names)
+        self.assertTrue({'analyticsQueries', 'analyticsDashboard', 'analyticsDashboards'} <= names)
 
     def test_graphql_exposes_the_dashboard_mutations(self):
         schema = graphene.Schema(query=Query, mutation=Mutation)
