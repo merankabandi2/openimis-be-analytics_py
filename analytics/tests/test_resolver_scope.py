@@ -21,9 +21,10 @@ from analytics.services import ExportService, QueryBuilderService
 from analytics.tests.test_grievance_scope import (
     GRIEVANCE_CONFIG, SECRET_RESTRICTED_READ, TICKET_READ,
 )
+from analytics.apps import AnalyticsConfig
 from analytics.tests.test_query_builder import _marker, _role_user
 
-QUERY = 200002
+QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 
 
 def _info(user):

@@ -16,9 +16,10 @@ from location.models import Location, LocationManager
 from location.test_helpers import assign_user_districts, create_test_village
 from payroll.models import BenefitConsumption
 
+from analytics.apps import AnalyticsConfig
 from analytics.tests.test_query_builder import _marker, _role_user, _run
 
-QUERY = 200002
+QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 
 
 @override_settings(ROW_SECURITY=True)
