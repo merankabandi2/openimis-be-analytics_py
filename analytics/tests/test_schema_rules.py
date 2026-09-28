@@ -41,7 +41,12 @@ from analytics.tests.test_permissions import _info, _query_input
 from analytics.tests.test_query_builder import _marker, _role_user
 
 VIEW, QUERY, EXPORT, DASHBOARD_EDIT, SHARE, CREATE, UPDATE = (
-    200001, 200002, 200003, 200004, 200005, 200006, 200007,
+    int(getattr(AnalyticsConfig, attr)[0]) for attr in (
+        'gql_analytics_dashboards_perms', 'gql_analytics_query_perms',
+        'gql_analytics_export_perms', 'gql_analytics_dashboard_create_perms',
+        'gql_analytics_dashboard_share_perms', 'gql_analytics_query_create_perms',
+        'gql_analytics_query_update_perms',
+    )
 )
 
 
@@ -322,8 +327,8 @@ class BuiltInDashboardsTest(TestCase):
 
 
 class DashboardEditingTest(TestCase):
-    """A holder of 200004 creates and edits their own dashboards; 200005 is
-    needed to make one public."""
+    """A holder of the dashboard right (DASHBOARD_EDIT) creates and edits their
+    own dashboards; the share right (SHARE) is needed to make one public."""
 
     def setUp(self):
         cache.clear()

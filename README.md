@@ -32,13 +32,13 @@ Export files are written to `MEDIA_ROOT/analytics_exports/` and served only by t
 
 ## Permissions
 
-- `200001` - View analytics dashboards (widget data included)
-- `200002` - Run custom queries
-- `200003` - Export data
-- `200004` - Save the layout of one's own dashboards
-- `200005` - Make a saved query public
-- `200006` - Save a query
-- `200007` - Edit or delete one's own saved queries
+- `210001` - View analytics dashboards (widget data included)
+- `210002` - Run custom queries
+- `210003` - Export data
+- `210004` - Save the layout of one's own dashboards
+- `210005` - Make a saved query public
+- `210006` - Save a query
+- `210007` - Edit or delete one's own saved queries
 
 Query results are scoped to the user: soft-deleted rows are excluded, location
 row security applies to individuals, groups, beneficiaries and payments, and
