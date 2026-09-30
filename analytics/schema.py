@@ -280,7 +280,7 @@ class Query(graphene.ObjectType):
         from analytics.apps import AnalyticsConfig
         _check_perms(info.context.user, AnalyticsConfig.gql_analytics_query_perms)
         normalised_entity = (entity_type or '').lower()
-        fields = QueryBuilderService.get_entity_fields(normalised_entity)
+        fields = QueryBuilderService.get_entity_fields(normalised_entity, info.context.user)
         return [EntityFieldType(**f) for f in fields]
 
     def resolve_analytics_exports(self, info, **kwargs):

@@ -75,7 +75,7 @@ def get_entity_schema(request, entity_type):
     Get the schema/fields for an entity type
     """
     try:
-        fields = QueryBuilderService.get_entity_fields(entity_type)
+        fields = QueryBuilderService.get_entity_fields(entity_type, request.user)
         return JsonResponse({
             'entity_type': entity_type,
             'fields': fields
