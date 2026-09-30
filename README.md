@@ -24,9 +24,18 @@ This module provides self-service analytics capabilities for openIMIS, allowing 
 
 The module supports the following configuration options:
 
-- `analytics_max_export_rows`: Maximum rows for export (default: 100,000); a larger export is refused
+- `analytics_max_export_rows`: Maximum rows for export (default: 20,000); a larger export is refused.
+  The export file is built in memory within the GraphQL request.
 - `analytics_max_query_rows`: Maximum rows returned on screen (default: 10,000)
 - `analytics_cache_ttl`: Cache time-to-live in seconds (default: 300)
+- `analytics_query_timeout`: Seconds each database statement of a query, widget or
+  export may run on PostgreSQL (default: 30). A statement running longer is cancelled
+  and the caller gets "The query ran longer than N seconds and was stopped; narrow the
+  filters". 0 keeps the connection's own `statement_timeout`.
+
+Filters `contains`, `startswith` and `endswith` are refused on JSON fields (`json_ext`):
+they cast every document of the table to text and no index serves them. `isnull`,
+`is_not_null` and the other operators remain accepted there.
 
 Export files are written to `MEDIA_ROOT/analytics_exports/` and served only by the download endpoint, which checks the export right. `MEDIA_ROOT` must be on persistent storage and must not be served directly by a web server.
 

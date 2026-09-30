@@ -1,9 +1,11 @@
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 import pandas as pd
 from django.apps import apps
 from django.core.cache import cache
+from django.db import OperationalError, connection, transaction
 from typing import Dict, List, Any, NamedTuple
 
 from django.core.exceptions import PermissionDenied
@@ -17,6 +19,10 @@ class QueryResult(NamedTuple):
     # on fields the user does see there. Filters on hidden fields count as
     # matching, so the flag can report tickets the full filter would exclude.
     restricted_rows_withheld: bool = False
+
+
+class QueryTimeout(ValueError):
+    """An analytics query ran past `analytics_query_timeout` and was cancelled."""
 
 
 # Filter operators accepted in a query config, mapped to the Django lookup they
@@ -37,6 +43,46 @@ FILTER_LOOKUPS = {
     'isnull': ('isnull', False),
     'is_not_null': ('isnull', True),
 }
+
+# Operators that compare a column as text (UPPER(column::text) LIKE ...). On a
+# JSON field this reads and casts every document of the table, and no index
+# serves it.
+TEXT_OPERATORS = {'contains', 'startswith', 'endswith'}
+
+# SQLSTATE of a statement cancelled by statement_timeout.
+QUERY_CANCELED = '57014'
+
+
+def _sqlstate(exc):
+    cause = exc.__cause__
+    return getattr(cause, 'pgcode', None) or getattr(cause, 'sqlstate', None)
+
+
+@contextmanager
+def _statement_timeout(seconds):
+    """Run the block in a transaction where PostgreSQL cancels any statement
+    running longer than `seconds`, then put the previous statement_timeout back.
+    A cancelled statement raises QueryTimeout. Other database vendors, and a
+    timeout of 0 or less, run the block unchanged."""
+    if connection.vendor != 'postgresql' or not seconds or seconds <= 0:
+        yield
+        return
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_setting('statement_timeout')")
+            previous = cursor.fetchone()[0]
+            cursor.execute("SELECT set_config('statement_timeout', %s, true)", [f'{int(seconds * 1000)}ms'])
+        try:
+            yield
+        except OperationalError as exc:
+            if _sqlstate(exc) == QUERY_CANCELED:
+                raise QueryTimeout(
+                    f"The query ran longer than {seconds:g} seconds and was stopped; narrow the filters"
+                ) from exc
+            raise
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('statement_timeout', %s, true)", [previous])
+
 
 # Relation paths that configs may reference in addition to the entity's own
 # concrete fields. Each path ends on a non-personal attribute (programme or
@@ -103,7 +149,8 @@ class QueryBuilderService:
             rows = OpenSearchQueryService.execute_query(entity_type, query_config)
             result = QueryResult(rows, False)
         else:
-            result = cls._execute_orm_query(entity_type, query_config, user, max_rows=max_rows)
+            with _statement_timeout(AnalyticsConfig.analytics_query_timeout):
+                result = cls._execute_orm_query(entity_type, query_config, user, max_rows=max_rows)
 
         cache.set(cache_key, tuple(result), AnalyticsConfig.analytics_cache_ttl)
         return result
@@ -314,20 +361,30 @@ class QueryBuilderService:
         return filters, list(group_by), aggregations, list(order_by), list(fields)
 
     @staticmethod
-    def _is_date_only_field(model, path):
-        """True when `path` (possibly a relation path) ends on a date column that
-        holds no time of day."""
+    def _resolve_field(model, path):
+        """The model field that `path` (possibly a relation path) ends on, or None."""
         from django.core.exceptions import FieldDoesNotExist
-        from django.db import models as dj_models
         field = None
         for part in path.split('__'):
             try:
                 field = model._meta.get_field(part)
             except FieldDoesNotExist:
-                return False
+                return None
             if field.is_relation and field.related_model is not None:
                 model = field.related_model
+        return field
+
+    @classmethod
+    def _is_date_only_field(cls, model, path):
+        """True when `path` ends on a date column that holds no time of day."""
+        from django.db import models as dj_models
+        field = cls._resolve_field(model, path)
         return isinstance(field, dj_models.DateField) and not isinstance(field, dj_models.DateTimeField)
+
+    @classmethod
+    def _is_json_field(cls, model, path):
+        from django.db import models as dj_models
+        return isinstance(cls._resolve_field(model, path), dj_models.JSONField)
 
     @staticmethod
     def _check_date_values(field, condition):
@@ -399,6 +456,11 @@ class QueryBuilderService:
             _require_allowed(field, 'filters')
             if cls._is_date_only_field(model, field):
                 cls._check_date_values(field, condition)
+            operator = condition.get('operator', 'exact') if isinstance(condition, dict) else 'exact'
+            if operator in TEXT_OPERATORS and cls._is_json_field(model, field):
+                raise ValueError(
+                    f"Text filter '{operator}' is not allowed on JSON field '{field}' for entity '{entity_type}'"
+                )
         for name in group_by:
             _require_allowed(name, 'group_by')
         for agg_name, agg_config in aggregations.items():
