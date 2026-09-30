@@ -39,7 +39,7 @@ from analytics.schema import (
 )
 from analytics.services import ExportService, QueryBuilderService
 from analytics.tests.test_permissions import _info, _query_input
-from analytics.tests.test_query_builder import _marker, _role_user
+from analytics.tests.test_query_builder import _marker, _role_user, _widen_allowlist
 
 VIEW, QUERY, EXPORT, DASHBOARD_EDIT, SHARE, CREATE, UPDATE = (
     int(getattr(AnalyticsConfig, attr)[0]) for attr in (
@@ -160,6 +160,7 @@ class SavedQueryMutationTest(TestCase):
 class DashboardTest(TestCase):
     def setUp(self):
         cache.clear()
+        _widen_allowlist(self, individual=['first_name', 'last_name'])
         self.marker = _marker()
         self.owner = _role_user(f'an_dash_owner_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT])
         self.viewer = _role_user(f'an_dash_viewer_{self.marker}', [VIEW])
@@ -214,6 +215,7 @@ class DashboardTest(TestCase):
 class ExportTest(TestCase):
     def setUp(self):
         cache.clear()
+        _widen_allowlist(self, individual=['first_name', 'last_name'])
         self.marker = _marker()
         self.user = _role_user(f'an_export_{self.marker}', [QUERY, EXPORT])
         for name in ('A', 'B', 'C'):
@@ -345,6 +347,7 @@ class DashboardEditingTest(TestCase):
 
     def setUp(self):
         cache.clear()
+        _widen_allowlist(self, individual=['first_name', 'last_name'])
         self.marker = _marker()
         self.editor = _role_user(f'an_ed_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT])
         self.sharer = _role_user(f'an_ed_sh_{self.marker}', [VIEW, QUERY, DASHBOARD_EDIT, SHARE])

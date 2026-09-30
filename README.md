@@ -32,6 +32,18 @@ The module supports the following configuration options:
   export may run on PostgreSQL (default: 30). A statement running longer is cancelled
   and the caller gets "The query ran longer than N seconds and was stopped; narrow the
   filters". 0 keeps the connection's own `statement_timeout`.
+- `analytics_field_allowlist`: per entity type, the columns and relation paths a
+  non-superuser may use in `fields`, `filters`, `group_by`, `order_by` and aggregations,
+  and the fields the query builder offers them. Default: `DEFAULT_FIELD_ALLOWLIST` in
+  `analytics/apps.py`, which leaves out `json_ext` on every entity, `first_name`,
+  `last_name` and `dob` on individuals, `code` on groups, `photo`, `receipt` and `code`
+  on payments, and `title`, `description` and `reporter_id` on grievances. An entity
+  given in the module configuration replaces its default list, the others keep
+  theirs; a value that is not a list allows nothing on that entity. Only the entity's
+  own columns and the relation paths already accepted by the module can be added.
+  Superusers are not restricted. A refused field raises
+  "Field 'X' is not allowed in <clause> for entity '<entity>'", and a query without
+  `fields` returns only the allowed columns.
 
 Filters `contains`, `startswith` and `endswith` are refused on JSON fields (`json_ext`):
 they cast every document of the table to text and no index serves them. `isnull`,

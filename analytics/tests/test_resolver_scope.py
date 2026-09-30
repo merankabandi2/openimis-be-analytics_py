@@ -22,7 +22,7 @@ from analytics.tests.test_grievance_scope import (
     GRIEVANCE_CONFIG, SECRET_RESTRICTED_READ, TICKET_READ,
 )
 from analytics.apps import AnalyticsConfig
-from analytics.tests.test_query_builder import _marker, _role_user
+from analytics.tests.test_query_builder import _marker, _role_user, _widen_allowlist
 
 QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 
@@ -88,6 +88,7 @@ class LocationResolverScopeTest(TestCase):
         for village in (self.village_in, village_out):
             Group(code=self.marker, location=village, json_ext={}).save(user=admin)
         self.user = _role_user(f'an_rs_l_{self.marker}', [QUERY])
+        _widen_allowlist(self, group=['code'])
         assign_user_districts(self.user, [f'D-{self.village_in.code}'])
         cache.clear()
 

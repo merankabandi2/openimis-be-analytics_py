@@ -35,7 +35,7 @@ from analytics.models import AnalyticsExport
 from analytics.schema import ExportAnalyticsDataMutation, Query as AnalyticsQuery
 from analytics.services import QueryBuilderService
 from analytics.tests.test_permissions import _info
-from analytics.tests.test_query_builder import _marker, _role_user, _run
+from analytics.tests.test_query_builder import _marker, _role_user, _run, _widen_allowlist
 
 QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 EXPORT = int(AnalyticsConfig.gql_analytics_export_perms[0])
@@ -134,6 +134,9 @@ class ModuleParityFixture(TestCase):
 
     def setUp(self):
         cache.clear()
+        # The grievance rules also govern the ticket fields an operator adds to
+        # the allowlist; these tests read them as such.
+        _widen_allowlist(self, grievance=['title', 'description', 'reporter_id', 'json_ext'])
         self.rights = _configure(self, self.anonymised)
         self.admin = create_test_interactive_user(username='analytics_parity_admin')
         individual = Individual(first_name='R', last_name='P', dob=datetime.date(1990, 1, 1), json_ext={})
