@@ -22,6 +22,10 @@ def _check_perms(user, perms):
         raise PermissionDenied("Unauthorized")
 
 
+def _holds(user, perms):
+    return bool(user and getattr(user, 'id', None) and user.has_perms(perms))
+
+
 def _visible_to(qs, user):
     """Scope saved queries/dashboards to public records or the caller's own."""
     if user.is_superuser:
@@ -139,6 +143,17 @@ class AnalyticsQueryType(DjangoObjectType):
     def resolve_can_edit(self, info):
         return _can_edit_query(info.context.user, self)
 
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        """Saved queries readable through node(id:) and connections: public or
+        own ones, for holders of the query or dashboards right."""
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        if not (_holds(user, AnalyticsConfig.gql_analytics_query_perms)
+                or _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms)):
+            return queryset.none()
+        return _visible_to(queryset, user)
+
 
 class AnalyticsDashboardType(DjangoObjectType):
     can_edit = graphene.Boolean()
@@ -159,6 +174,14 @@ class AnalyticsDashboardType(DjangoObjectType):
     def resolve_widgets(self, info, **kwargs):
         return self.widgets.filter(validity_to__isnull=True)
 
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        if not _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms):
+            return queryset.none()
+        return _visible_to(queryset, user)
+
 
 class AnalyticsWidgetType(DjangoObjectType):
     class Meta:
@@ -166,6 +189,16 @@ class AnalyticsWidgetType(DjangoObjectType):
         interfaces = (graphene.relay.Node,)
         filter_fields = {}
         connection_class = ExtendedConnection
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        """Widgets of the dashboards the user may view."""
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        if not _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms):
+            return queryset.none()
+        dashboards = _visible_to(AnalyticsDashboard.objects.all(), user)
+        return queryset.filter(dashboard__in=dashboards)
 
 
 class AnalyticsExportType(DjangoObjectType):
@@ -176,6 +209,16 @@ class AnalyticsExportType(DjangoObjectType):
             'export_format': ['exact'],
         }
         connection_class = ExtendedConnection
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        """The user's own exports, all of them for a superuser, for holders of
+        the export right."""
+        from analytics.apps import AnalyticsConfig
+        user = info.context.user
+        if not _holds(user, AnalyticsConfig.gql_analytics_export_perms):
+            return queryset.none()
+        return queryset if user.is_superuser else queryset.filter(exported_by=user)
 
 
 class EntityFieldType(graphene.ObjectType):
