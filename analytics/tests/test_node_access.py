@@ -1,6 +1,7 @@
 """node(id:) and connections on the analytics types apply the rights and the
 owner rules of the analytics list queries."""
 import base64
+import datetime
 
 import graphene
 from django.contrib.auth.models import AnonymousUser
@@ -36,6 +37,7 @@ class NodeAccessTest(TestCase):
         self.owner = _role_user(f'an_node_owner_{marker}', [VIEW, QUERY, EXPORT])
         self.other = _role_user(f'an_node_other_{marker}', [VIEW, QUERY, EXPORT])
         self.viewer = _role_user(f'an_node_viewer_{marker}', [VIEW])
+        self.no_rights = _role_user(f'an_node_none_{marker}', [])
         self.private_query = AnalyticsQuery.objects.create(
             name='private', entity_type='grievance', created_by=self.owner, is_public=False,
             query_config={'filters': {'category': 'violence_vbg'}, 'aggregations': {'n': {'function': 'count'}}},
@@ -53,6 +55,10 @@ class NodeAccessTest(TestCase):
         self.public_widget = AnalyticsWidget.objects.create(
             dashboard=self.public_dashboard, query=self.private_query, widget_type='metric', title='P',
             config={'a': 1}, position={'x': 0, 'y': 0, 'w': 4, 'h': 4},
+        )
+        self.public_query = AnalyticsQuery.objects.create(
+            name='public', entity_type='individual', created_by=self.owner, is_public=True,
+            query_config={'aggregations': {'n': {'function': 'count'}}},
         )
 
     def _node(self, user, type_name, pk, selection='id'):
@@ -101,3 +107,49 @@ class NodeAccessTest(TestCase):
         self.assertIsNone(result.errors, result.errors)
         edges = result.data['analyticsDashboard']['widgets']['edges']
         self.assertEqual([(e['node']['title'], e['node']['query']['name']) for e in edges], [('P', 'private')])
+
+    def _public_objects(self):
+        return (
+            ('AnalyticsQueryType', self.public_query.id, 'name'),
+            ('AnalyticsDashboardType', self.public_dashboard.id, 'name'),
+            ('AnalyticsWidgetType', self.public_widget.id, 'title'),
+        )
+
+    def test_another_rights_holder_gets_public_records(self):
+        for type_name, pk, selection in self._public_objects():
+            with self.subTest(type=type_name):
+                self.assertIsNotNone(self._node(self.other, type_name, pk, selection))
+
+    def test_user_without_the_analytics_rights_gets_no_public_record(self):
+        for type_name, pk, selection in self._public_objects():
+            with self.subTest(type=type_name):
+                self.assertIsNone(self._node(self.no_rights, type_name, pk, selection))
+
+    def test_dashboard_viewer_without_the_query_right_gets_no_export(self):
+        self.assertIsNone(self._node(self.viewer, 'AnalyticsExportType', self.export.id, 'rowCount'))
+
+    def _retire(self, *records):
+        for record in records:
+            type(record).objects.filter(pk=record.pk).update(validity_to=datetime.datetime.now())
+
+    def test_retired_public_query_and_dashboard_are_not_returned(self):
+        self._retire(self.public_query, self.public_dashboard)
+        for user in (self.owner, self.other):
+            for type_name, pk, selection in (
+                ('AnalyticsQueryType', self.public_query.id, 'name'),
+                ('AnalyticsDashboardType', self.public_dashboard.id, 'name'),
+            ):
+                with self.subTest(user=user.username, type=type_name):
+                    self.assertIsNone(self._node(user, type_name, pk, selection))
+
+    def test_retired_widget_is_not_returned(self):
+        self._retire(self.public_widget)
+        for user in (self.owner, self.other):
+            with self.subTest(user=user.username):
+                self.assertIsNone(self._node(user, 'AnalyticsWidgetType', self.public_widget.id, 'title'))
+
+    def test_widget_of_a_retired_dashboard_is_not_returned(self):
+        self._retire(self.public_dashboard)
+        for user in (self.owner, self.other):
+            with self.subTest(user=user.username):
+                self.assertIsNone(self._node(user, 'AnalyticsWidgetType', self.public_widget.id, 'title'))

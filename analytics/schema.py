@@ -145,14 +145,14 @@ class AnalyticsQueryType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        """Saved queries readable through node(id:) and connections: public or
-        own ones, for holders of the query or dashboards right."""
+        """Saved queries readable through node(id:) and connections: active
+        public or own ones, for holders of the query or dashboards right."""
         from analytics.apps import AnalyticsConfig
         user = info.context.user
         if not (_holds(user, AnalyticsConfig.gql_analytics_query_perms)
                 or _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms)):
             return queryset.none()
-        return _visible_to(queryset, user)
+        return _visible_to(queryset.filter(validity_to__isnull=True), user)
 
 
 class AnalyticsDashboardType(DjangoObjectType):
@@ -180,7 +180,7 @@ class AnalyticsDashboardType(DjangoObjectType):
         user = info.context.user
         if not _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms):
             return queryset.none()
-        return _visible_to(queryset, user)
+        return _visible_to(queryset.filter(validity_to__isnull=True), user)
 
 
 class AnalyticsWidgetType(DjangoObjectType):
@@ -192,13 +192,13 @@ class AnalyticsWidgetType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        """Widgets of the dashboards the user may view."""
+        """Active widgets of the active dashboards the user may view."""
         from analytics.apps import AnalyticsConfig
         user = info.context.user
         if not _holds(user, AnalyticsConfig.gql_analytics_dashboards_perms):
             return queryset.none()
-        dashboards = _visible_to(AnalyticsDashboard.objects.all(), user)
-        return queryset.filter(dashboard__in=dashboards)
+        dashboards = _visible_to(AnalyticsDashboard.objects.filter(validity_to__isnull=True), user)
+        return queryset.filter(validity_to__isnull=True, dashboard__in=dashboards)
 
 
 class AnalyticsExportType(DjangoObjectType):
