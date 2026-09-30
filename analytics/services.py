@@ -109,12 +109,24 @@ class QueryBuilderService:
         return result
 
     @classmethod
-    def get_entity_fields(cls, entity_type: str) -> List[Dict]:
-        """Get available fields for an entity type."""
+    def get_entity_fields(cls, entity_type: str, user) -> List[Dict]:
+        """Fields of an entity type that `user` may reference. For grievances,
+        none without the ticket read right, and a field hidden to the user on
+        every category they can read is left out."""
         if cls._use_opensearch():
             from analytics.opensearch_service import OpenSearchQueryService
-            return OpenSearchQueryService.get_entity_fields(entity_type)
-        return cls._get_orm_entity_fields(entity_type)
+            fields = OpenSearchQueryService.get_entity_fields(entity_type)
+        else:
+            fields = cls._get_orm_entity_fields(entity_type)
+        if entity_type == 'grievance':
+            from analytics import grievance_access
+            try:
+                grievance_access.check_read_right(user)
+            except PermissionDenied:
+                return []
+            selectable = grievance_access.selectable_fields(user)
+            fields = [f for f in fields if grievance_access.canonical_fields([f['name']]) <= selectable]
+        return fields
 
     # ── ORM ───────────────────────────────────────────────────────
 
@@ -213,66 +225,18 @@ class QueryBuilderService:
     def _scope_grievance(cls, queryset, user, referenced_fields):
         """Apply the grievance module's read rules to a Ticket queryset.
 
-        The caller needs the base ticket read right. Tickets of categories the user
-        cannot see are dropped. A ticket the user may only see in restricted form,
-        because of its category or of one of its flags, is kept only when every
-        referenced field is visible on it. As in GrievanceAccessControl.
-        get_visible_fields, the visible fields are the category's visible_fields,
-        or the basic fields when the category configures none.
+        The caller needs the base ticket read right. Tickets the module does not
+        list for the user are dropped, and so is any ticket on which one of the
+        referenced fields is hidden to the user (see analytics.grievance_access).
 
-        Returns (queryset, withheld). `withheld` is None when no ticket is
-        dropped this way, else (readable, parts): `readable` is the queryset of
-        tickets the user can see, and each part pairs a Q selecting dropped
-        tickets with the canonical names of the fields the user sees on them.
+        Returns (queryset, withheld). `withheld` is None when no readable ticket
+        is dropped for a hidden field, else (readable, parts): `readable` is the
+        queryset of tickets the user can see, and each part pairs a Q selecting
+        dropped tickets with the canonical names of the referenced fields the
+        user sees on them.
         """
-        from django.db.models import Q
-        from grievance_social_protection.apps import TicketConfig
-        if not user.has_perms(TicketConfig.gql_query_tickets_perms):
-            raise PermissionDenied("Reading grievance tickets requires the grievance read right")
-        try:
-            from grievance_social_protection.access_control import GrievanceAccessControl as access
-        except ImportError:
-            return queryset, None
-
-        readable = access.filter_ticket_queryset(queryset, user)
-        referenced = cls._canonical_ticket_fields(referenced_fields)
-
-        flag_q = getattr(access, '_flag_stored_q', None) or (lambda flag: Q(flags__icontains=flag))
-        restricting_flags = [
-            flag for flag, info in (TicketConfig.processed_flags or {}).items()
-            if info.get('generated_rights')
-            and access.get_user_access_level(user, None, [flag]) == access.ACCESS_RESTRICTED
-        ]
-        flagged = None
-        for flag in restricting_flags:
-            flagged = flag_q(flag) if flagged is None else flagged | flag_q(flag)
-
-        parts = []
-        categories = list(TicketConfig.processed_categories or {})
-        for category in categories:
-            visible = access.get_visible_fields(user, category)
-            if visible is not None:
-                selector = Q(category=category)
-            elif flagged is not None:
-                visible = access.get_visible_fields(user, category, restricting_flags[:1])
-                selector = Q(category=category) & flagged
-            if visible is None or referenced <= cls._canonical_ticket_fields(visible):
-                continue
-            parts.append((selector, cls._canonical_ticket_fields(visible)))
-
-        if flagged is not None:
-            # Flagged tickets without a category, or of a category absent from the configuration.
-            visible = cls._canonical_ticket_fields(access.get_visible_fields(user, None, restricting_flags[:1]))
-            if not referenced <= visible:
-                selector = (~Q(category__in=categories) & flagged) if categories else flagged
-                parts.append((selector, visible))
-
-        if not parts:
-            return readable, None
-        dropped = parts[0][0]
-        for selector, _ in parts[1:]:
-            dropped |= selector
-        return readable.exclude(dropped), (readable, parts)
+        from analytics import grievance_access
+        return grievance_access.scope(queryset, user, referenced_fields)
 
     @classmethod
     def _withheld_tickets_match(cls, withheld, filters):
@@ -296,20 +260,8 @@ class QueryBuilderService:
 
     @classmethod
     def _canonical_ticket_fields(cls, names):
-        """Map Ticket field names/attnames (and the `reporter` generic relation) to
-        model field names, so config references compare with visible_fields."""
-        from django.core.exceptions import FieldDoesNotExist
-        from grievance_social_protection.models import Ticket
-        canonical = set()
-        for name in names:
-            if name == 'reporter':
-                canonical.update({'reporter_type', 'reporter_id'})
-                continue
-            try:
-                canonical.add(Ticket._meta.get_field(name).name)
-            except FieldDoesNotExist:
-                canonical.add(name)
-        return canonical
+        from analytics.grievance_access import canonical_fields
+        return canonical_fields(names)
 
     @staticmethod
     def _normalise_config(query_config):

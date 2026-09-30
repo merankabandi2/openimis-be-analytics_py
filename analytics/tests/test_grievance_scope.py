@@ -197,11 +197,12 @@ class WithheldRestrictedTicketsTest(GrievanceFixture):
 
 
 class FlagRestrictedTicketFieldsTest(GrievanceFixture):
-    """A ticket restricted by a flag shows its category's visible fields, or the
-    basic fields when the category configures none, as TicketGQLType does.
+    """A ticket restricted by a flag is left out of a query that reads a field
+    the grievance module hides on it. Which fields stay visible on such a
+    ticket depends on the grievance module version; test_grievance_module_parity
+    checks them against the module itself.
 
-    The fixture tickets carry the marker as status, a field visible in every
-    restricted form, so the queries select them without reading channel."""
+    The fixture tickets carry the marker as status."""
 
     def setUp(self):
         super().setUp()
@@ -218,29 +219,5 @@ class FlagRestrictedTicketFieldsTest(GrievanceFixture):
         }, user)
         return {row[group_by]: row['n'] for row in result.rows}, result.restricted_rows_withheld
 
-    def test_grouping_on_basic_fields_counts_flag_restricted_tickets(self):
-        self.assertEqual(self._grouped(self.restricted_user, 'category'), ({'public': 2, 'secret': 1}, False))
-        self.assertEqual(self._grouped(self.restricted_user, 'status'), ({self.marker: 3}, False))
-
-    def test_flag_restricted_ticket_without_category_shows_the_basic_fields(self):
-        Ticket.objects.filter(channel=self.marker, flags='hidden').update(category=None)
-        self.assertEqual(
-            self._grouped(self.restricted_user, 'category'), ({None: 1, 'public': 1, 'secret': 1}, False),
-        )
-
-    def test_flag_restricted_ticket_of_a_configured_category_shows_its_visible_fields(self):
-        Ticket(
-            title='secret flagged title', description='sensitive', category='secret', flags='hidden',
-            status=self.marker, channel=self.marker,
-        ).save(user=self.admin)
-        user = _role_user(f'an_grv_fcat_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_RESTRICTED_READ])
-        # channel is among the secret category's visible fields, not among the
-        # basic fields: only the flagged public ticket is left out.
-        self.assertEqual(self._grouped(user, 'channel'), ({self.marker: 3}, True))
-
     def test_field_hidden_on_a_flag_restricted_ticket_withholds_it(self):
         self.assertEqual(self._grouped(self.restricted_user, 'title'), ({'public title': 1}, True))
-
-    def test_visible_filter_that_excludes_the_withheld_tickets_reports_nothing(self):
-        other_category = {'category': {'operator': 'exact', 'value': 'no such category'}}
-        self.assertEqual(self._grouped(self.restricted_user, 'title', **other_category), ({}, False))
