@@ -3,9 +3,12 @@ from django.apps import AppConfig
 MODULE_NAME = "analytics"
 
 DEFAULT_CFG = {
-    "analytics_max_export_rows": 100000,
+    "analytics_max_export_rows": 20000,
     "analytics_max_query_rows": 10000,
     "analytics_cache_ttl": 300,  # 5 minutes
+    # Seconds a database statement of an analytics query may run; 0 keeps the
+    # connection's statement_timeout.
+    "analytics_query_timeout": 30,
     "gql_analytics_dashboards_perms": ["803001"],
     "gql_analytics_query_perms": ["803002"],
     "gql_analytics_export_perms": ["803003"],
@@ -32,6 +35,7 @@ class AnalyticsConfig(AppConfig):
     analytics_max_export_rows = DEFAULT_CFG["analytics_max_export_rows"]
     analytics_max_query_rows = DEFAULT_CFG["analytics_max_query_rows"]
     analytics_cache_ttl = DEFAULT_CFG["analytics_cache_ttl"]
+    analytics_query_timeout = DEFAULT_CFG["analytics_query_timeout"]
 
     def ready(self):
         from core.models import ModuleConfiguration
