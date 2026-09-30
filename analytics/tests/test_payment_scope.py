@@ -17,7 +17,7 @@ from location.test_helpers import assign_user_districts, create_test_village
 from payroll.models import BenefitConsumption
 
 from analytics.apps import AnalyticsConfig
-from analytics.tests.test_query_builder import _marker, _role_user, _run
+from analytics.tests.test_query_builder import _marker, _role_user, _run, _widen_allowlist
 
 QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 
@@ -26,6 +26,7 @@ QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 class PaymentScopeTest(TestCase):
     def setUp(self):
         cache.clear()
+        _widen_allowlist(self, payment=['code'])
         self.admin = create_test_interactive_user(username='analytics_qb_admin')
         self.marker = _marker()
         self.allowed = create_test_village({'code': _marker()[:6]})

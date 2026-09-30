@@ -44,6 +44,18 @@ def _run(entity, config, user, **kwargs):
     return QueryBuilderService._execute_orm_query(entity, config, user, **kwargs)
 
 
+def _widen_allowlist(testcase, **extra):
+    """For the rest of `testcase`, let non-superusers also reference the fields
+    listed in `extra` under each entity type, on top of the default allowlist."""
+    from analytics.apps import DEFAULT_FIELD_ALLOWLIST
+    allowlist = {entity: list(names) for entity, names in DEFAULT_FIELD_ALLOWLIST.items()}
+    for entity, names in extra.items():
+        allowlist[entity] = allowlist[entity] + list(names)
+    patcher = mock.patch.object(AnalyticsConfig, 'analytics_field_allowlist', allowlist)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class OrmQueryTestCase(TestCase):
     def setUp(self):
         cache.clear()
@@ -197,6 +209,7 @@ class LocationScopeTest(TestCase):
         for village in (self.village_in, self.village_out):
             Group(code=self.marker, location=village, json_ext={}).save(user=self.admin)
         self.user = _role_user(f'an_loc_{self.marker}', AnalyticsConfig.gql_analytics_query_perms)
+        _widen_allowlist(self, group=['code'])
         assign_user_districts(self.user, [f'D-{code_in}'])
         cache.clear()
 

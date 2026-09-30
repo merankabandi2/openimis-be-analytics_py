@@ -10,7 +10,7 @@ from grievance_social_protection.models import Ticket
 
 from analytics.apps import AnalyticsConfig
 from analytics.services import QueryBuilderService
-from analytics.tests.test_query_builder import _marker, _role_user, _run
+from analytics.tests.test_query_builder import _marker, _role_user, _run, _widen_allowlist
 
 QUERY = int(AnalyticsConfig.gql_analytics_query_perms[0])
 TICKET_READ = 127000
@@ -44,6 +44,9 @@ class GrievanceFixture(TestCase):
         patcher = mock.patch.multiple(TicketConfig, **GRIEVANCE_CONFIG)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The grievance rules also govern the ticket fields an operator adds to
+        # the allowlist; these tests read them as such.
+        _widen_allowlist(self, grievance=['title', 'description', 'reporter_id', 'json_ext'])
         cache.clear()
         self.admin = create_test_interactive_user(username='analytics_qb_admin')
         self.marker = _marker()

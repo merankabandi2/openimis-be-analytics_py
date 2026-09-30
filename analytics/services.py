@@ -157,7 +157,8 @@ class QueryBuilderService:
 
     @classmethod
     def get_entity_fields(cls, entity_type: str, user) -> List[Dict]:
-        """Fields of an entity type that `user` may reference. For grievances,
+        """Fields of an entity type that `user` may reference. For anyone but a
+        superuser, only the fields of the entity's allowlist. For grievances,
         none without the ticket read right, and a field hidden to the user on
         every category they can read is left out."""
         if cls._use_opensearch():
@@ -165,6 +166,12 @@ class QueryBuilderService:
             fields = OpenSearchQueryService.get_entity_fields(entity_type)
         else:
             fields = cls._get_orm_entity_fields(entity_type)
+        model = cls._get_orm_model(entity_type)
+        if model is None:
+            return []
+        if not user.is_superuser:
+            allowlisted = cls._allowlisted_field_names(model, entity_type)
+            fields = [f for f in fields if f['name'] in allowlisted]
         if entity_type == 'grievance':
             from analytics import grievance_access
             try:
@@ -213,6 +220,47 @@ class QueryBuilderService:
         relation paths listed in RELATION_PATHS. Any other `__` traversal is
         rejected so a query cannot walk relations into Individual/Group PII."""
         return cls._concrete_field_names(model) | RELATION_PATHS.get(entity_type, set())
+
+    @classmethod
+    def _allowlisted_field_names(cls, model, entity_type):
+        """Names a non-superuser may reference: the entity's entry in
+        `analytics_field_allowlist`, or its default entry when the setting has
+        none, limited to _allowed_field_names. A foreign key listed by name or
+        by column admits both. An entry that is not a list admits nothing."""
+        from analytics.apps import AnalyticsConfig, DEFAULT_FIELD_ALLOWLIST
+        configured = AnalyticsConfig.analytics_field_allowlist
+        if not isinstance(configured, dict):
+            configured = {}
+        listed = configured.get(entity_type, DEFAULT_FIELD_ALLOWLIST.get(entity_type, []))
+        if not isinstance(listed, (list, tuple)):
+            return set()
+        listed = {name for name in listed if isinstance(name, str)}
+        for field in model._meta.get_fields():
+            if getattr(field, 'concrete', False) and not field.many_to_many:
+                attname = getattr(field, 'attname', None) or field.name
+                if field.name in listed or attname in listed:
+                    listed |= {field.name, attname}
+        return listed & cls._allowed_field_names(model, entity_type)
+
+    @classmethod
+    def _referenceable_field_names(cls, model, entity_type, user):
+        """Names `user` may reference in a config: every allowed name for a
+        superuser, the allowlisted ones for anyone else."""
+        if user.is_superuser:
+            return cls._allowed_field_names(model, entity_type)
+        return cls._allowlisted_field_names(model, entity_type)
+
+    @staticmethod
+    def _default_columns(model, referenceable):
+        """Columns (attnames) of the entity's concrete fields in `referenceable`,
+        in model order: what a row holds when the config selects no field."""
+        columns = []
+        for field in model._meta.get_fields():
+            if getattr(field, 'concrete', False) and not field.many_to_many:
+                attname = getattr(field, 'attname', None) or field.name
+                if field.name in referenceable or attname in referenceable:
+                    columns.append(attname)
+        return columns
 
     @staticmethod
     def _row_security_applies(user):
@@ -442,7 +490,7 @@ class QueryBuilderService:
         if not model:
             raise ValueError(f"Unknown entity type: {entity_type}")
 
-        allowed_fields = cls._allowed_field_names(model, entity_type)
+        allowed_fields = cls._referenceable_field_names(model, entity_type, user)
 
         def _require_allowed(name, context):
             if name not in allowed_fields:
@@ -478,6 +526,10 @@ class QueryBuilderService:
             _require_allowed(name, 'fields')
 
         grouped = bool(group_by or aggregations)
+        if not grouped and not fields and not user.is_superuser:
+            fields = cls._default_columns(model, allowed_fields)
+            if not fields:
+                raise ValueError(f"No field of entity '{entity_type}' is allowed")
         referenced = {f for f, _ in filters} | set(group_by)
         referenced |= {name[1:] if name.startswith('-') else name for name in order_by} - set(aggregations)
         for agg_config in aggregations.values():
