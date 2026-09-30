@@ -13,6 +13,22 @@ from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, Analyti
 from .services import QueryBuilderService, ExportService
 
 
+def _require_superuser(info):
+    """Analytics reads and writes are limited to logged-in superusers."""
+    user = getattr(info.context, 'user', None)
+    if not (user is not None and user.is_authenticated and getattr(user, 'is_superuser', False)):
+        raise PermissionDenied("Unauthorized")
+
+
+class _SuperuserOnlyQuerysetMixin:
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        user = getattr(info.context, 'user', None)
+        if not (user is not None and user.is_authenticated and getattr(user, 'is_superuser', False)):
+            return queryset.none()
+        return queryset
+
+
 def _resolve_pk(raw_id):
     """Accept either a plain UUID or a Relay global ID (base64 of `Type:UUID`).
 
@@ -35,7 +51,7 @@ def _resolve_pk(raw_id):
     return raw_id
 
 
-class AnalyticsQueryType(DjangoObjectType):
+class AnalyticsQueryType(_SuperuserOnlyQuerysetMixin, DjangoObjectType):
     class Meta:
         model = AnalyticsQuery
         interfaces = (graphene.relay.Node,)
@@ -47,7 +63,7 @@ class AnalyticsQueryType(DjangoObjectType):
         connection_class = ExtendedConnection
 
 
-class AnalyticsDashboardType(DjangoObjectType):
+class AnalyticsDashboardType(_SuperuserOnlyQuerysetMixin, DjangoObjectType):
     class Meta:
         model = AnalyticsDashboard
         interfaces = (graphene.relay.Node,)
@@ -59,7 +75,7 @@ class AnalyticsDashboardType(DjangoObjectType):
         connection_class = ExtendedConnection
 
 
-class AnalyticsWidgetType(DjangoObjectType):
+class AnalyticsWidgetType(_SuperuserOnlyQuerysetMixin, DjangoObjectType):
     class Meta:
         model = AnalyticsWidget
         interfaces = (graphene.relay.Node,)
@@ -67,7 +83,7 @@ class AnalyticsWidgetType(DjangoObjectType):
         connection_class = ExtendedConnection
 
 
-class AnalyticsExportType(DjangoObjectType):
+class AnalyticsExportType(_SuperuserOnlyQuerysetMixin, DjangoObjectType):
     class Meta:
         model = AnalyticsExport
         interfaces = (graphene.relay.Node,)
@@ -121,24 +137,29 @@ class Query(graphene.ObjectType):
     )
 
     def resolve_analytics_queries(self, info, **kwargs):
+        _require_superuser(info)
         qs = AnalyticsQuery.objects.filter(validity_to__isnull=True)
         if not info.context.user.is_superuser:
             qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
         return qs
 
     def resolve_analytics_query(self, info, id):
+        _require_superuser(info)
         return AnalyticsQuery.objects.get(pk=_resolve_pk(id))
 
     def resolve_analytics_dashboards(self, info, **kwargs):
+        _require_superuser(info)
         qs = AnalyticsDashboard.objects.filter(validity_to__isnull=True)
         if not info.context.user.is_superuser:
             qs = qs.filter(Q(is_public=True) | Q(created_by=info.context.user))
         return qs
 
     def resolve_analytics_dashboard(self, info, id):
+        _require_superuser(info)
         return AnalyticsDashboard.objects.get(pk=_resolve_pk(id))
 
     def resolve_execute_analytics_query(self, info, entity_type, query_config):
+        _require_superuser(info)
         start = time.time()
         config = json.loads(query_config) if isinstance(query_config, str) else query_config
         # Graphene auto-uppercases Django choice fields when exposing them as enums; the
@@ -154,11 +175,13 @@ class Query(graphene.ObjectType):
         )
 
     def resolve_analytics_entity_fields(self, info, entity_type):
+        _require_superuser(info)
         normalised_entity = (entity_type or '').lower()
         fields = QueryBuilderService.get_entity_fields(normalised_entity)
         return [EntityFieldType(**f) for f in fields]
 
     def resolve_analytics_exports(self, info, **kwargs):
+        _require_superuser(info)
         qs = AnalyticsExport.objects.all()
         if not info.context.user.is_superuser:
             qs = qs.filter(exported_by=info.context.user)
@@ -182,6 +205,7 @@ class CreateAnalyticsQueryMutation(graphene.Mutation):
     query = graphene.Field(AnalyticsQueryType)
 
     def mutate(self, info, input):
+        _require_superuser(info)
         obj = AnalyticsQuery.objects.create(
             name=input.name,
             description=input.description,
@@ -201,6 +225,7 @@ class UpdateAnalyticsQueryMutation(graphene.Mutation):
     query = graphene.Field(AnalyticsQueryType)
 
     def mutate(self, info, id, input):
+        _require_superuser(info)
         obj = AnalyticsQuery.objects.get(pk=id)
         if obj.created_by != info.context.user and not info.context.user.is_superuser:
             raise PermissionDenied("You can only edit your own queries")
@@ -225,6 +250,7 @@ class ExportAnalyticsDataMutation(graphene.Mutation):
     export_id = graphene.ID()
 
     def mutate(self, info, entity_type, query_config, export_format, query_id=None):
+        _require_superuser(info)
         from datetime import datetime
         from analytics.apps import AnalyticsConfig
 
