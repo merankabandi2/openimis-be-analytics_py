@@ -125,8 +125,12 @@ class NodeAccessTest(TestCase):
             with self.subTest(type=type_name):
                 self.assertIsNone(self._node(self.no_rights, type_name, pk, selection))
 
-    def test_dashboard_viewer_without_the_query_right_gets_no_export(self):
-        self.assertIsNone(self._node(self.viewer, 'AnalyticsExportType', self.export.id, 'rowCount'))
+    def test_own_export_needs_the_export_right(self):
+        export = AnalyticsExport.objects.create(
+            export_format='csv', row_count=3, file_path='/nonexistent/viewer.csv', filters_applied={},
+            exported_by=self.viewer,
+        )
+        self.assertIsNone(self._node(self.viewer, 'AnalyticsExportType', export.id, 'rowCount'))
 
     def _retire(self, *records):
         for record in records:
