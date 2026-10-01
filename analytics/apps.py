@@ -32,6 +32,9 @@ DEFAULT_CFG = {
     # connection's statement_timeout.
     "analytics_query_timeout": 30,
     "analytics_field_allowlist": DEFAULT_FIELD_ALLOWLIST,
+    # True: every analytics read and write also requires a logged-in superuser,
+    # whatever analytics rights the user holds.
+    "analytics_superuser_only": True,
     "gql_analytics_dashboards_perms": ["803001"],
     "gql_analytics_query_perms": ["803002"],
     "gql_analytics_export_perms": ["803003"],
@@ -60,6 +63,7 @@ class AnalyticsConfig(AppConfig):
     analytics_cache_ttl = DEFAULT_CFG["analytics_cache_ttl"]
     analytics_query_timeout = DEFAULT_CFG["analytics_query_timeout"]
     analytics_field_allowlist = DEFAULT_CFG["analytics_field_allowlist"]
+    analytics_superuser_only = DEFAULT_CFG["analytics_superuser_only"]
 
     def ready(self):
         from core.models import ModuleConfiguration

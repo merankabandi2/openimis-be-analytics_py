@@ -302,7 +302,9 @@ class BuiltInDashboardsTest(TestCase):
     def test_app_start_creates_no_dashboard(self):
         create_test_interactive_user(username='Admin')
         before = AnalyticsDashboard.objects.count()
-        apps.get_app_config('analytics').ready()
+        # ready() reloads the module configuration, analytics_superuser_only included.
+        with mock.patch.object(AnalyticsConfig, 'analytics_superuser_only', AnalyticsConfig.analytics_superuser_only):
+            apps.get_app_config('analytics').ready()
         self.assertEqual(AnalyticsDashboard.objects.count(), before)
         self.assertFalse(AnalyticsDashboard.objects.filter(
             name__in=[name for name, _ in BUILT_IN_DASHBOARDS]
