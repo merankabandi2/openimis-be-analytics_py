@@ -17,13 +17,21 @@ from .models import AnalyticsQuery, AnalyticsDashboard, AnalyticsWidget, Analyti
 from .services import QueryBuilderService, ExportService
 
 
+def _admitted(user):
+    """Logged in, and a superuser when analytics_superuser_only is set."""
+    from analytics.apps import AnalyticsConfig
+    if not (user and getattr(user, 'id', None)):
+        return False
+    return getattr(user, 'is_superuser', False) or not AnalyticsConfig.analytics_superuser_only
+
+
 def _check_perms(user, perms):
-    if not user or not getattr(user, 'id', None) or not user.has_perms(perms):
+    if not _admitted(user) or not user.has_perms(perms):
         raise PermissionDenied("Unauthorized")
 
 
 def _holds(user, perms):
-    return bool(user and getattr(user, 'id', None) and user.has_perms(perms))
+    return _admitted(user) and user.has_perms(perms)
 
 
 def _visible_to(qs, user):

@@ -7,6 +7,7 @@ from django.contrib.auth.decorators import login_required, permission_required
 from django.views.decorators.http import require_http_methods
 from .apps import AnalyticsConfig
 from .models import AnalyticsExport
+from .schema import _admitted
 from .services import QueryBuilderService
 
 
@@ -36,7 +37,7 @@ def download_export(request, export_id):
     # The module's numeric right code (RoleRight), same check as resolve_analytics_exports
     # in schema.py — Django's declared-permission `permission_required` has no matching
     # permission for AnalyticsExport, so it can never be satisfied.
-    if not request.user.has_perms(AnalyticsConfig.gql_analytics_export_perms):
+    if not (_admitted(request.user) and request.user.has_perms(AnalyticsConfig.gql_analytics_export_perms)):
         raise PermissionDenied("Unauthorized")
     try:
         export_record = AnalyticsExport.objects.get(pk=export_id)
@@ -74,6 +75,8 @@ def get_entity_schema(request, entity_type):
     """
     Get the schema/fields for an entity type
     """
+    if not _admitted(request.user):
+        raise PermissionDenied("Unauthorized")
     try:
         fields = QueryBuilderService.get_entity_fields(entity_type, request.user)
         return JsonResponse({
