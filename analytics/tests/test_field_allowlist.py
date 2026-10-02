@@ -46,6 +46,9 @@ CLAUSES = {
     'aggregations': lambda field: {'aggregations': {'n': {'function': 'count', 'field': field}}},
 }
 
+# Clauses refused on a JSON field to every caller (cost bound, test_cost_bounds).
+JSON_REFUSED_CLAUSES = ('group_by', 'order_by', 'aggregations')
+
 
 class ExcludedFieldTest(TestCase):
     def setUp(self):
@@ -79,7 +82,20 @@ class ExcludedFieldTest(TestCase):
             for field in fields:
                 for clause, build in CLAUSES.items():
                     with self.subTest(entity=entity_type, field=field, clause=clause):
+                        if field == 'json_ext' and clause in JSON_REFUSED_CLAUSES:
+                            continue
                         _run(entity_type, build(field), self.admin)
+
+    def test_superuser_is_refused_json_ext_where_it_reads_every_document(self):
+        for entity_type in EXCLUDED:
+            for clause in JSON_REFUSED_CLAUSES:
+                with self.subTest(entity=entity_type, clause=clause):
+                    with self.assertRaises(ValueError) as refused:
+                        _run(entity_type, CLAUSES[clause]('json_ext'), self.admin)
+                    self.assertEqual(
+                        str(refused.exception),
+                        f"JSON field 'json_ext' is not allowed in {clause} for entity '{entity_type}'",
+                    )
 
 
 @override_settings(ROW_SECURITY=False)

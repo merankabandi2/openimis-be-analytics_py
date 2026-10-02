@@ -78,10 +78,89 @@ class JsonTextFilterTest(CostBoundsTestCase):
         with self.assertRaises(ValueError):
             self._names(config)
 
-    def test_other_filters_on_json_ext_still_run(self):
+    def test_null_checks_on_json_ext_still_run(self):
         self.assertEqual(self._names(self._config(json_ext={'operator': 'isnull', 'value': True})), [])
         self.assertEqual(self._names(self._config(json_ext={'operator': 'is_not_null'})), ['Alain', 'Alice', 'Bob'])
-        self.assertEqual(self._names(self._config(json_ext={'operator': 'exact', 'value': {'note': 'alpha'}})), ['Alice'])
+
+    def test_value_filters_on_json_ext_are_refused(self):
+        cases = {
+            'exact': {'note': 'alpha'}, 'ne': {'note': 'alpha'}, 'in': [{'note': 'alpha'}],
+            'not_in': [{'note': 'alpha'}], 'gt': {}, 'gte': {}, 'lt': {}, 'lte': {}, 'range': [{}, {}],
+        }
+        for operator, value in cases.items():
+            with self.subTest(operator=operator):
+                config = self._config(json_ext={'operator': operator, 'value': value})
+                with self.assertRaises(ValueError) as refused:
+                    self._names(config)
+                self.assertEqual(
+                    str(refused.exception),
+                    f"Filter '{operator}' is not allowed on JSON field 'json_ext' for entity 'individual'",
+                )
+
+    def test_a_bare_value_filter_on_json_ext_is_refused(self):
+        config = self._config()
+        config['filters']['json_ext'] = {'note': 'alpha'}
+        with self.assertRaises(ValueError):
+            self._names(config)
+
+
+class JsonGroupingTest(CostBoundsTestCase):
+    def _run(self, config, entity_type='individual'):
+        with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
+            return QueryBuilderService.execute_query(entity_type, config, self.admin)
+
+    def test_group_by_json_ext_is_refused_for_every_entity(self):
+        for entity_type in QueryBuilderService.ENTITY_TYPES:
+            with self.subTest(entity=entity_type):
+                with self.assertRaises(ValueError) as refused:
+                    QueryBuilderService._execute_orm_query(entity_type, {'group_by': ['json_ext']}, self.admin)
+                self.assertEqual(
+                    str(refused.exception),
+                    f"JSON field 'json_ext' is not allowed in group_by for entity '{entity_type}'",
+                )
+
+    def test_aggregations_on_json_ext_are_refused(self):
+        for function in ('count', 'min', 'max', 'sum', 'avg'):
+            with self.subTest(function=function):
+                config = self._config()
+                config.pop('fields')
+                config['aggregations'] = {'n': {'function': function, 'field': 'json_ext'}}
+                with self.assertRaises(ValueError) as refused:
+                    self._run(config)
+                self.assertEqual(
+                    str(refused.exception),
+                    "JSON field 'json_ext' is not allowed in aggregations for entity 'individual'",
+                )
+
+    def test_measures_on_json_ext_are_refused(self):
+        config = {'dimensions': ['first_name'], 'measures': [{'function': 'max', 'field': 'json_ext'}]}
+        with self.assertRaises(ValueError):
+            self._run(config)
+
+    def test_order_by_json_ext_is_refused(self):
+        for order in ('json_ext', '-json_ext'):
+            with self.subTest(order=order):
+                config = self._config()
+                config['order_by'] = [order]
+                with self.assertRaises(ValueError) as refused:
+                    self._run(config)
+                self.assertEqual(
+                    str(refused.exception),
+                    "JSON field 'json_ext' is not allowed in order_by for entity 'individual'",
+                )
+
+    def test_json_ext_can_still_be_read_as_a_column(self):
+        config = self._config()
+        config['fields'] = ['first_name', 'json_ext']
+        rows = self._run(config).rows
+        self.assertEqual(sorted((r['first_name'], r['json_ext']) for r in rows),
+                         [('Alain', {}), ('Alice', {'note': 'alpha'}), ('Bob', {})])
+
+    def test_grouping_and_counting_rows_still_run(self):
+        config = {'filters': {'last_name': {'operator': 'exact', 'value': self.marker}},
+                  'group_by': ['first_name'], 'aggregations': {'n': {'function': 'count', 'field': 'id'}}}
+        rows = self._run(config).rows
+        self.assertEqual([(r['first_name'], r['n']) for r in rows], [('Alain', 1), ('Alice', 1), ('Bob', 1)])
 
     def test_text_filters_on_text_columns_still_run(self):
         self.assertEqual(self._names(self._config(first_name={'operator': 'contains', 'value': 'LI'})), ['Alice'])
