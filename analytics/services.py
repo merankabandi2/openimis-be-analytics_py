@@ -49,6 +49,10 @@ FILTER_LOOKUPS = {
 # serves it.
 TEXT_OPERATORS = {'contains', 'startswith', 'endswith'}
 
+# The only filter operators accepted on a JSON field. Every other operator, and
+# grouping, aggregating or ordering on it, reads every document of the table.
+JSON_FIELD_OPERATORS = {'isnull', 'is_not_null'}
+
 # SQLSTATE of a statement cancelled by statement_timeout.
 QUERY_CANCELED = '57014'
 
@@ -505,21 +509,32 @@ class QueryBuilderService:
             if cls._is_date_only_field(model, field):
                 cls._check_date_values(field, condition)
             operator = condition.get('operator', 'exact') if isinstance(condition, dict) else 'exact'
-            if operator in TEXT_OPERATORS and cls._is_json_field(model, field):
+            if operator not in JSON_FIELD_OPERATORS and cls._is_json_field(model, field):
+                kind = 'Text filter' if operator in TEXT_OPERATORS else 'Filter'
                 raise ValueError(
-                    f"Text filter '{operator}' is not allowed on JSON field '{field}' for entity '{entity_type}'"
+                    f"{kind} '{operator}' is not allowed on JSON field '{field}' for entity '{entity_type}'"
                 )
+
+        def _refuse_json(name, context):
+            if cls._is_json_field(model, name):
+                raise ValueError(
+                    f"JSON field '{name}' is not allowed in {context} for entity '{entity_type}'"
+                )
+
         for name in group_by:
             _require_allowed(name, 'group_by')
+            _refuse_json(name, 'group_by')
         for agg_name, agg_config in aggregations.items():
             if agg_config.get('function') not in agg_funcs:
                 raise ValueError(f"Unsupported aggregation function '{agg_config.get('function')}'")
             _require_allowed(agg_config.get('field') or 'id', 'aggregations')
+            _refuse_json(agg_config.get('field') or 'id', 'aggregations')
         for name in order_by:
             bare = name[1:] if name.startswith('-') else name
             if bare in aggregations:
                 continue
             _require_allowed(bare, 'order_by')
+            _refuse_json(bare, 'order_by')
             if group_by and bare not in group_by:
                 raise ValueError(f"Field '{bare}' in order_by must be one of the group_by fields")
         for name in fields:
