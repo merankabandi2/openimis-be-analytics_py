@@ -29,7 +29,6 @@ from analytics.schema import (
     DeleteAnalyticsDashboardMutation,
     DeleteAnalyticsQueryMutation,
     DeleteAnalyticsWidgetMutation,
-    ExportAnalyticsDataMutation,
     Mutation,
     Query,
     UpdateAnalyticsDashboardLayoutMutation,
@@ -38,6 +37,7 @@ from analytics.schema import (
     _can_edit_dashboard,
 )
 from analytics.services import ExportService, QueryBuilderService
+from analytics.tasks import build_export
 from analytics.tests.test_permissions import _info, _query_input
 from analytics.tests.test_query_builder import _marker, _role_user, _widen_allowlist
 
@@ -229,22 +229,24 @@ class ExportTest(TestCase):
         }
 
     def _export(self):
+        """Build the export as the queued task does; return the record, or the
+        refusal the requester is notified of."""
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
-            result = ExportAnalyticsDataMutation.mutate(
-                None, _info(self.user), entity_type='individual', query_config=self.config, export_format='csv',
-            )
-        record = AnalyticsExport.objects.get(pk=result.export_id)
+            try:
+                record = build_export(self.user, 'individual', self.config, 'csv')
+            except ValueError as refused:
+                return str(refused)
         self.addCleanup(lambda: os.path.exists(record.file_path) and os.remove(record.file_path))
-        return result
+        return record
 
     def test_export_is_not_cut_to_the_on_screen_limit(self):
         self.assertEqual(self._export().row_count, 3)
 
     def test_export_over_the_export_cap_is_refused(self):
         with mock.patch.object(AnalyticsConfig, 'analytics_max_export_rows', 2):
-            with self.assertRaises(ValueError) as refused:
-                self._export()
-        self.assertEqual(str(refused.exception), 'Export exceeds maximum rows (2); add filters or grouping')
+            refused = self._export()
+        self.assertEqual(refused, 'Export exceeds maximum rows (2); add filters or grouping')
+        self.assertFalse(AnalyticsExport.objects.filter(exported_by=self.user).exists())
 
     def test_grouped_export_over_the_cap_asks_only_for_filters(self):
         self.config = {
@@ -253,9 +255,8 @@ class ExportTest(TestCase):
             'aggregations': {'total': {'function': 'count', 'field': 'id'}},
         }
         with mock.patch.object(AnalyticsConfig, 'analytics_max_export_rows', 2):
-            with self.assertRaises(ValueError) as refused:
-                self._export()
-        self.assertEqual(str(refused.exception), 'Export exceeds maximum rows (2); narrow the filters')
+            refused = self._export()
+        self.assertEqual(refused, 'Export exceeds maximum rows (2); narrow the filters')
 
 
 class ExcelExportTest(TestCase):

@@ -44,6 +44,9 @@ FILTER_LOOKUPS = {
     'is_not_null': ('isnull', True),
 }
 
+# Aggregation functions accepted in a query config.
+AGGREGATION_FUNCTIONS = ('count', 'sum', 'avg', 'min', 'max')
+
 # Operators that compare a column as text (UPPER(column::text) LIKE ...). On a
 # JSON field this reads and casts every document of the table, and no index
 # serves it.
@@ -509,14 +512,27 @@ class QueryBuilderService:
         return ~q if negated else q
 
     @classmethod
-    def _execute_orm_query(cls, entity_type: str, query_config: Dict, user, max_rows: int = None) -> QueryResult:
-        import datetime
-        import decimal
-        import uuid as uuid_mod
-        from django.db.models import Count, Sum, Avg, Min, Max
-        from analytics.apps import AnalyticsConfig
-        agg_funcs = {'count': Count, 'sum': Sum, 'avg': Avg, 'min': Min, 'max': Max}
+    def check_query(cls, entity_type: str, query_config: Dict, user) -> None:
+        """Raise the refusal execute_query would raise for this config and user
+        before reading any row: unknown entity, field, operator or aggregation,
+        a field outside the user's allowlist, a JSON field misuse, a malformed
+        date, or a grievance query without the ticket read right."""
+        if entity_type not in cls.ENTITY_TYPES:
+            raise ValueError(f"Unknown entity type: {entity_type}")
+        if cls._use_opensearch() and user.is_superuser:
+            return
+        checked = cls._checked_config(entity_type, query_config, user)
+        for field, condition in checked['filters']:
+            cls._filter_q(field, condition)
+        if entity_type == 'grievance':
+            from analytics import grievance_access
+            grievance_access.check_read_right(user)
 
+    @classmethod
+    def _checked_config(cls, entity_type: str, query_config: Dict, user) -> Dict:
+        """The config of `query_config` in canonical shape, with the selected
+        fields and the fields it references, once every name and operator in it
+        is accepted for `user`; raises ValueError otherwise."""
         model = cls._get_orm_model(entity_type)
         if not model:
             raise ValueError(f"Unknown entity type: {entity_type}")
@@ -552,7 +568,7 @@ class QueryBuilderService:
             _require_allowed(name, 'group_by')
             _refuse_json(name, 'group_by')
         for agg_name, agg_config in aggregations.items():
-            if agg_config.get('function') not in agg_funcs:
+            if agg_config.get('function') not in AGGREGATION_FUNCTIONS:
                 raise ValueError(f"Unsupported aggregation function '{agg_config.get('function')}'")
             _require_allowed(agg_config.get('field') or 'id', 'aggregations')
             _refuse_json(agg_config.get('field') or 'id', 'aggregations')
@@ -581,8 +597,25 @@ class QueryBuilderService:
                 referenced.add(agg_field)
         if not grouped:
             referenced |= set(fields) if fields else cls._concrete_field_names(model)
+        return {
+            'model': model, 'filters': filters, 'group_by': group_by, 'aggregations': aggregations,
+            'order_by': order_by, 'fields': fields, 'referenced': referenced,
+        }
 
-        queryset, withheld = cls._scoped_queryset(entity_type, model, user, referenced)
+    @classmethod
+    def _execute_orm_query(cls, entity_type: str, query_config: Dict, user, max_rows: int = None) -> QueryResult:
+        import datetime
+        import decimal
+        import uuid as uuid_mod
+        from django.db.models import Count, Sum, Avg, Min, Max
+        from analytics.apps import AnalyticsConfig
+        agg_funcs = {'count': Count, 'sum': Sum, 'avg': Avg, 'min': Min, 'max': Max}
+
+        checked = cls._checked_config(entity_type, query_config, user)
+        model, filters, group_by = checked['model'], checked['filters'], checked['group_by']
+        aggregations, order_by, fields = checked['aggregations'], checked['order_by'], checked['fields']
+
+        queryset, withheld = cls._scoped_queryset(entity_type, model, user, checked['referenced'])
         for field, condition in filters:
             queryset = queryset.filter(cls._filter_q(field, condition))
         restricted_rows_withheld = cls._withheld_tickets_match(withheld, filters)
