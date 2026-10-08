@@ -9,6 +9,12 @@ user, so the tests hold for every grievance module version on the path.
 The module returns None for a restricted field whose value is empty, so every
 fixture ticket holds a value in each gated field; tickets without a configured
 flag carry ROUTINE, a flag absent from the configuration.
+
+Assemblies may add rules of their own to the module's ticket list and ticket
+saves. The fixture meets the two of the Merankabandi assembly: every ticket is
+located on a test colline whose province is assigned to every test user
+(province scope), and every ticket records the complainant's consent to keep
+their identity (VBG tickets otherwise lose their reporter on save).
 """
 import copy
 import csv
@@ -29,6 +35,7 @@ from grievance_social_protection.apps import TicketConfig
 from grievance_social_protection.models import Ticket
 from grievance_social_protection.schema import Query as GrievanceQuery
 from individual.models import Individual
+from location.test_helpers import assign_user_districts, create_test_village
 
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsExport
@@ -142,6 +149,9 @@ class ModuleParityFixture(TestCase):
         individual = Individual(first_name='R', last_name='P', dob=datetime.date(1990, 1, 1), json_ext={})
         individual.save(user=self.admin)
         reporter_type = ContentType.objects.get_for_model(Individual)
+        colline_code = _marker()[:8]
+        self.colline = create_test_village({'code': colline_code})
+        self.province_code = f'D-{colline_code}'
         self.tickets = {}
         for key, category, flags in (
             ('pay', 'paiement', 'ROUTINE'),
@@ -155,7 +165,12 @@ class ModuleParityFixture(TestCase):
                 title=f'title {key}', description=f'description {key}', code=_marker()[:16],
                 category=category, flags=flags, status='OPEN', priority='High', channel='telephone',
                 resolution=f'resolution {key}', date_of_incident=datetime.date(2026, 5, 1),
-                due_date=datetime.date(2026, 6, 1), json_ext={'key': key},
+                due_date=datetime.date(2026, 6, 1),
+                json_ext={
+                    'key': key,
+                    'location': {'colline_code': self.colline.code},
+                    'consent': {'store_identity': 'oui'},
+                },
                 reporter_type=reporter_type, reporter_id=str(individual.id), attending_staff=self.admin,
             )
             ticket.save(user=self.admin)
@@ -165,6 +180,14 @@ class ModuleParityFixture(TestCase):
 
     def _right(self, name, permission):
         return self.rights[(name, permission)]
+
+    def _user(self, username, rights):
+        """Non-admin user holding exactly `rights`, assigned the province of
+        the fixture tickets."""
+        user = _role_user(username, rights)
+        assign_user_districts(user, [self.province_code])
+        cache.clear()
+        return user
 
     def _users(self):
         """Users holding the rights of the production roles analysed in #251."""
@@ -177,14 +200,14 @@ class ModuleParityFixture(TestCase):
         base = [QUERY, EXPORT, TICKET_READ]
         marker = _marker()
         users = {
-            'no_vbg_right': _role_user(f'par_novbg_{marker}', base + [pay_read, special_read]),
-            'restricted': _role_user(
+            'no_vbg_right': self._user(f'par_novbg_{marker}', base + [pay_read, special_read]),
+            'restricted': self._user(
                 f'par_restr_{marker}', base + [pay_read, special_read, sensitive_restricted, *vbg_restricted]),
-            'restricted_with_base_cud': _role_user(
+            'restricted_with_base_cud': self._user(
                 f'par_cud_{marker}',
                 base + [TICKET_CREATE, TICKET_UPDATE, TICKET_DELETE,
                         pay_read, special_read, sensitive_restricted, *vbg_restricted]),
-            'full': _role_user(
+            'full': self._user(
                 f'par_full_{marker}', base + [pay_read, special_read, sensitive_read, *vbg_read]),
         }
         users['superuser'] = self.admin
@@ -330,14 +353,14 @@ class EntityFieldsTest(ModuleParityFixture):
         return {f.name for f in fields}
 
     def test_user_restricted_to_vbg_is_offered_only_fields_the_module_shows_there(self):
-        user = _role_user(f'par_ef_{_marker()}', [QUERY, TICKET_READ, self._right(VBG, 'restricted_read')])
+        user = self._user(f'par_ef_{_marker()}', [QUERY, TICKET_READ, self._right(VBG, 'restricted_read')])
         shown = self._module_view(user)[str(self.tickets['vbg'].id)]
         listed = self._listed(user)
         self.assertEqual(listed & set(GATED_FIELDS.values()), shown)
         self.assertNotIn('title', listed)
 
     def test_user_without_the_ticket_read_right_is_offered_no_field(self):
-        user = _role_user(f'par_ef0_{_marker()}', [QUERY])
+        user = self._user(f'par_ef0_{_marker()}', [QUERY])
         self.assertEqual(self._listed(user), set())
 
     def test_superuser_is_offered_every_field(self):
@@ -366,7 +389,7 @@ class AnonymisedFieldsTest(ModuleParityFixture):
         self.assertFalse(any('vbg' in r['description'] or 'viol' in r['description'] for r in grouped))
 
     def test_anonymised_fields_are_not_offered(self):
-        user = _role_user(f'par_an_{_marker()}', [QUERY, TICKET_READ, self._right(VBG, 'read')])
+        user = self._user(f'par_an_{_marker()}', [QUERY, TICKET_READ, self._right(VBG, 'read')])
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
             listed = {f.name for f in AnalyticsQuery().resolve_analytics_entity_fields(_info(user), 'grievance')}
         self.assertNotIn('description', listed)
