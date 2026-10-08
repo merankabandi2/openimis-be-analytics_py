@@ -1,7 +1,6 @@
 import base64
 import json
 import time
-import uuid
 from datetime import datetime as py_datetime
 
 import graphene
@@ -610,52 +609,38 @@ class DeleteAnalyticsWidgetMutation(graphene.Mutation):
 
 
 class ExportAnalyticsDataMutation(graphene.Mutation):
+    """Queue an export of the query's rows. Refusals that need no row are
+    raised here; the Celery task analytics.tasks.export_analytics_data checks
+    the rights again, applies the timeout and the export cap, writes the file,
+    records the AnalyticsExport and notifies the requester."""
+
     class Arguments:
         entity_type = graphene.String(required=True)
         query_config = graphene.JSONString(required=True)
         export_format = graphene.String(required=True)
         query_id = graphene.ID()
 
+    queued = graphene.Boolean()
+    # Always null: the task writes the file, and analytics_exports lists it once done.
     export_url = graphene.String()
     export_id = graphene.ID()
     row_count = graphene.Int()
 
     def mutate(self, info, entity_type, query_config, export_format, query_id=None):
         from analytics.apps import AnalyticsConfig
+        from analytics.tasks import queue_analytics_export
 
         user = info.context.user
         _check_perms(user, AnalyticsConfig.gql_analytics_export_perms)
         entity_type = _normalise_entity_type(entity_type)
         config = _load_config(query_config)
-        # The export covers every matching row up to the export cap, not the
-        # on-screen row limit.
-        max_rows = AnalyticsConfig.analytics_max_export_rows
-        result = QueryBuilderService.execute_query(entity_type, config, user, max_rows=max_rows)
-        if result.truncated:
-            # Grouping cannot shorten a result that is already grouped.
-            _, group_by, _, _, _ = QueryBuilderService._normalise_config(config)
-            advice = "narrow the filters" if group_by else "add filters or grouping"
-            raise ValueError(f"Export exceeds maximum rows ({max_rows}); {advice}")
-        results = result.rows
-
-        timestamp = py_datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"analytics_{entity_type}_{timestamp}_{uuid.uuid4().hex[:8]}"
-
-        filepath = ExportService.export(results, filename, export_format)
-
-        record = AnalyticsExport.objects.create(
-            query_id=_resolve_pk(query_id) if query_id else None,
-            export_format=export_format,
-            filters_applied=config,
-            row_count=len(results),
-            file_path=filepath,
-            exported_by=user,
+        if export_format not in ExportService.EXPORTERS:
+            raise ValueError(f"Unsupported export format: {export_format}")
+        QueryBuilderService.check_query(entity_type, config, user)
+        queue_analytics_export(
+            user, entity_type, config, export_format, _resolve_pk(query_id) if query_id else None,
         )
-        return ExportAnalyticsDataMutation(
-            export_url=f"/api/analytics/download/{record.id}/",
-            export_id=record.id,
-            row_count=len(results),
-        )
+        return ExportAnalyticsDataMutation(queued=True)
 
 
 class Mutation(graphene.ObjectType):

@@ -39,8 +39,9 @@ from location.test_helpers import assign_user_districts, create_test_village
 
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsExport
-from analytics.schema import ExportAnalyticsDataMutation, Query as AnalyticsQuery
+from analytics.schema import Query as AnalyticsQuery
 from analytics.services import QueryBuilderService
+from analytics.tasks import export_analytics_data
 from analytics.tests.test_permissions import _info
 from analytics.tests.test_query_builder import _marker, _role_user, _run, _widen_allowlist
 
@@ -334,11 +335,10 @@ class NoVbgRightTest(ModuleParityFixture):
 
     def test_export_holds_no_vbg_ticket(self):
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
-            result = ExportAnalyticsDataMutation.mutate(
-                None, _info(self.user), entity_type='grievance',
-                query_config={'fields': ['category', 'description', 'title']}, export_format='csv',
+            export_id = export_analytics_data(
+                str(self.user.id), 'grievance', {'fields': ['category', 'description', 'title']}, 'csv',
             )
-        record = AnalyticsExport.objects.get(pk=result.export_id)
+        record = AnalyticsExport.objects.get(pk=export_id)
         self.addCleanup(lambda: os.path.exists(record.file_path) and os.remove(record.file_path))
         with open(record.file_path, newline='') as handle:
             exported = list(csv.DictReader(handle))

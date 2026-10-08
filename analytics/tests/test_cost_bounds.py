@@ -13,9 +13,8 @@ from individual.models import Individual
 
 from analytics.apps import DEFAULT_CFG, AnalyticsConfig
 from analytics.models import AnalyticsExport
-from analytics.schema import ExportAnalyticsDataMutation
 from analytics.services import QueryBuilderService, QueryTimeout
-from analytics.tests.test_permissions import _info
+from analytics.tasks import export_analytics_data
 from analytics.tests.test_query_builder import _marker
 
 
@@ -211,13 +210,11 @@ class StatementTimeoutTest(CostBoundsTestCase):
         seen = []
         with mock.patch.object(AnalyticsConfig, 'analytics_query_timeout', 9), self._spy_timeout(seen), \
                 mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
-            result = ExportAnalyticsDataMutation.mutate(
-                None, _info(self.admin), entity_type='individual', query_config=self._config(), export_format='csv',
-            )
-        record = AnalyticsExport.objects.get(pk=result.export_id)
+            export_id = export_analytics_data(str(self.admin.id), 'individual', self._config(), 'csv')
+        record = AnalyticsExport.objects.get(pk=export_id)
         self.addCleanup(lambda: os.path.exists(record.file_path) and os.remove(record.file_path))
         self.assertEqual(seen, ['9s'])
-        self.assertEqual(result.row_count, 3)
+        self.assertEqual(record.row_count, 3)
 
 
 class ExportCapTest(TestCase):
