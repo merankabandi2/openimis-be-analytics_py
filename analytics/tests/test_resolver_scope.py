@@ -42,6 +42,9 @@ def _execute(user, entity_type, config):
 
 
 class GrievanceResolverScopeTest(TestCase):
+    """Tickets are located on a test colline whose province is assigned to the
+    test users: an assembly may limit tickets to the user's provinces."""
+
     def setUp(self):
         patcher = mock.patch.multiple(TicketConfig, **GRIEVANCE_CONFIG)
         patcher.start()
@@ -49,26 +52,35 @@ class GrievanceResolverScopeTest(TestCase):
         cache.clear()
         self.admin = create_test_interactive_user(username='analytics_qb_admin')
         self.marker = _marker()
+        colline_code = _marker()[:8]
+        colline = create_test_village({'code': colline_code})
+        self.province_code = f'D-{colline_code}'
         for category in ('public', 'secret'):
             Ticket(
                 title=f'{category} title', description='sensitive', category=category,
-                status='OPEN', channel=self.marker,
+                status='OPEN', channel=self.marker, json_ext={'location': {'colline_code': colline.code}},
             ).save(user=self.admin)
         self.config = {'filters': {'channel': {'operator': 'exact', 'value': self.marker}}, 'limit': 10}
 
+    def _user(self, username, rights):
+        user = _role_user(username, rights)
+        assign_user_districts(user, [self.province_code])
+        cache.clear()
+        return user
+
     def test_query_right_without_ticket_read_right_returns_no_ticket(self):
-        user = _role_user(f'an_rs_gn_{self.marker}', [QUERY])
+        user = self._user(f'an_rs_gn_{self.marker}', [QUERY])
         with self.assertRaises(PermissionDenied):
             _execute(user, 'grievance', self.config)
 
     def test_restricted_reader_gets_no_column_outside_visible_fields(self):
-        user = _role_user(f'an_rs_gr_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ])
+        user = self._user(f'an_rs_gr_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ])
         rows = _execute(user, 'grievance', self.config)
         self.assertEqual(sorted(row['category'] for row in rows), ['public'])
         self.assertNotIn('secret title', [row.get('title') for row in rows])
 
     def test_withheld_restricted_tickets_are_reported_to_the_client(self):
-        user = _role_user(f'an_rs_gw_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ])
+        user = self._user(f'an_rs_gw_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ])
         config = dict(self.config, filters=dict(self.config['filters'], category={'operator': 'exact', 'value': 'secret'}))
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
             result = Query().resolve_execute_analytics_query(
