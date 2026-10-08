@@ -165,22 +165,22 @@ class QueryBuilderService:
     @classmethod
     def _access_digest(cls, entity_type, user):
         """SHA-256 of what decides, besides the query config, the rows and fields
-        `user` reads on `entity_type`: superuser status, rights, the locations
-        row security admits, the analytics field allowlist and, for grievances,
-        the grievance module configuration. A result cached under one state is
-        not served under another."""
+        `user` reads on `entity_type`: superuser status, rights, assigned
+        locations, the analytics field allowlist and, for grievances, the
+        grievance module configuration. A result cached under one state is not
+        served under another. Locations count whatever ROW_SECURITY says: a
+        ticket filter registered with the grievance module may scope by them."""
         from analytics.apps import AnalyticsConfig
+        from core.models import InteractiveUser
         state = {
             'superuser': bool(user.is_superuser),
             'rights': sorted(str(right) for right in (getattr(user, 'rights', None) or [])),
             'allowlist': AnalyticsConfig.analytics_field_allowlist,
         }
-        if cls._row_security_applies(user):
-            from core.models import InteractiveUser
+        core_user = getattr(user, '_u', user)
+        if not user.is_superuser and isinstance(core_user, InteractiveUser):
             from location.models import LocationManager
-            core_user = getattr(user, '_u', user)
-            if isinstance(core_user, InteractiveUser):
-                state['locations'] = sorted(LocationManager().get_allowed_ids(core_user))
+            state['locations'] = sorted(LocationManager().get_allowed_ids(core_user))
         if entity_type == 'grievance':
             from analytics import grievance_access
             state['grievance'] = grievance_access.configuration()

@@ -9,6 +9,7 @@ from core.models import Role, RoleRight
 from core.services.userServices import create_or_update_user_roles
 from core.test_helpers import create_test_interactive_user
 from grievance_social_protection.apps import TicketConfig
+from grievance_social_protection.models import Ticket
 from individual.models import Group
 from location.models import UserDistrict
 from location.test_helpers import create_test_village, assign_user_districts
@@ -39,14 +40,30 @@ def _execute(entity, config, user):
 
 
 class GrievanceResultCacheTest(GrievanceFixture):
-    """A cached grievance result is not served once the rights or the grievance
-    configuration that scoped it have changed."""
+    """A cached grievance result is not served once the rights, the provinces or
+    the grievance configuration that scoped it have changed.
+
+    The tickets are placed on a test colline whose province is given to the
+    test users: an assembly may limit tickets to the user's provinces."""
+
+    def setUp(self):
+        super().setUp()
+        code = _marker()[:8]
+        colline = create_test_village({'code': code})
+        self.province_code = f'D-{code}'
+        Ticket.objects.filter(channel=self.marker).update(json_ext={'location': {'colline_code': colline.code}})
+
+    def _user(self, username, rights):
+        user = _role_user(username, rights)
+        assign_user_districts(user, [self.province_code])
+        cache.clear()
+        return user
 
     def _count_config(self):
         return self._config(group_by=['category'], aggregations={'n': {'function': 'count', 'field': 'id'}})
 
     def test_a_withdrawn_category_right_is_applied_to_the_next_run(self):
-        user = _role_user(f'an_cache_full_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
+        user = self._user(f'an_cache_full_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
         # Created before the first run: saving a role clears a local-memory cache.
         narrower = _role(f'an-cache-narrow-{self.marker}', [QUERY, TICKET_READ, HIDDEN_FLAG_READ])
         before = _execute('grievance', self._count_config(), user)
@@ -58,7 +75,7 @@ class GrievanceResultCacheTest(GrievanceFixture):
         self.assertEqual({row['category']: row['n'] for row in after}, {'public': 2})
 
     def test_a_withdrawn_ticket_read_right_refuses_the_next_run(self):
-        user = _role_user(f'an_cache_read_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
+        user = self._user(f'an_cache_read_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
         query_only = _role(f'an-cache-query-{self.marker}', [QUERY])
         _execute('grievance', self._count_config(), user)
 
@@ -68,13 +85,28 @@ class GrievanceResultCacheTest(GrievanceFixture):
             _execute('grievance', self._count_config(), user)
 
     def test_a_grievance_configuration_change_is_applied_to_the_next_run(self):
-        user = _role_user(f'an_cache_cfg_{self.marker}', [QUERY, TICKET_READ, HIDDEN_FLAG_READ])
+        user = self._user(f'an_cache_cfg_{self.marker}', [QUERY, TICKET_READ, HIDDEN_FLAG_READ])
         before = _execute('grievance', self._count_config(), user)
         self.assertEqual({row['category']: row['n'] for row in before}, {'public': 2})
 
         with mock.patch.object(TicketConfig, 'processed_categories', {}):
             after = _execute('grievance', self._count_config(), user)
         self.assertEqual({row['category']: row['n'] for row in after}, {'public': 2, 'secret': 1})
+
+
+    @override_settings(ROW_SECURITY=False)
+    def test_a_withdrawn_province_is_applied_to_the_next_run(self):
+        user = self._user(f'an_cache_prov_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
+        _execute('grievance', self._count_config(), user)
+
+        for district in UserDistrict.objects.filter(user=user.i_user, validity_to__isnull=True):
+            district.validity_to = datetime.datetime.now()
+            district.save()
+
+        self.assertEqual(
+            _execute('grievance', self._count_config(), user),
+            _run('grievance', self._count_config(), user).rows,
+        )
 
 
 class AllowlistResultCacheTest(TestCase):
