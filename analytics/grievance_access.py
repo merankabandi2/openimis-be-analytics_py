@@ -87,6 +87,15 @@ def visible_fields(user, category, flags, fields):
     }
 
 
+def configuration():
+    """The grievance module settings the visibility rules read: every key of
+    its DEFAULT_CFG and the category and flag rules derived from them, as
+    loaded on TicketConfig."""
+    from grievance_social_protection import apps as grievance_apps
+    keys = set(getattr(grievance_apps, 'DEFAULT_CFG', {})) | {'processed_categories', 'processed_flags'}
+    return {key: getattr(grievance_apps.TicketConfig, key, None) for key in sorted(keys)}
+
+
 def check_read_right(user):
     from grievance_social_protection.apps import TicketConfig
     if not user or not getattr(user, 'id', None) or not user.has_perms(TicketConfig.gql_query_tickets_perms):
