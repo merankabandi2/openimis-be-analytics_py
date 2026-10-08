@@ -5,6 +5,7 @@ from django.core.exceptions import PermissionDenied
 from django.test import TestCase
 
 from core.test_helpers import create_test_interactive_user
+from location.test_helpers import assign_user_districts, create_test_village
 from grievance_social_protection.apps import TicketConfig
 from grievance_social_protection.models import Ticket
 
@@ -38,7 +39,11 @@ GRIEVANCE_CONFIG = {
 
 
 class GrievanceFixture(TestCase):
-    """Three tickets: a public one, a secret one, and a public one flagged hidden."""
+    """Three tickets: a public one, a secret one, and a public one flagged hidden.
+
+    The tickets are located on a test colline whose province is assigned to the
+    test users (see _user): an assembly may limit tickets to the user's
+    provinces."""
 
     def setUp(self):
         patcher = mock.patch.multiple(TicketConfig, **GRIEVANCE_CONFIG)
@@ -50,11 +55,22 @@ class GrievanceFixture(TestCase):
         cache.clear()
         self.admin = create_test_interactive_user(username='analytics_qb_admin')
         self.marker = _marker()
+        colline_code = _marker()[:8]
+        self.colline = create_test_village({'code': colline_code})
+        self.province_code = f'D-{colline_code}'
         for category, flags in (('public', None), ('secret', None), ('public', 'hidden')):
             Ticket(
                 title=f'{category} title', description='sensitive', category=category, flags=flags,
-                status='OPEN', channel=self.marker,
+                status='OPEN', channel=self.marker, json_ext={'location': {'colline_code': self.colline.code}},
             ).save(user=self.admin)
+
+    def _user(self, username, rights):
+        """Non-admin user holding exactly `rights`, assigned the province of
+        the fixture tickets."""
+        user = _role_user(username, rights)
+        assign_user_districts(user, [self.province_code])
+        cache.clear()
+        return user
 
     def _config(self, **extra):
         config = {'filters': {'channel': {'operator': 'exact', 'value': self.marker}}}
@@ -70,18 +86,18 @@ class GrievanceFixture(TestCase):
 
 class GrievanceScopeTest(GrievanceFixture):
     def test_user_without_ticket_read_right_is_refused(self):
-        user = _role_user(f'an_grv_none_{self.marker}', [QUERY])
+        user = self._user(f'an_grv_none_{self.marker}', [QUERY])
         with self.assertRaises(PermissionDenied):
             self._count_by_category(user)
 
     def test_full_reader_sees_every_ticket(self):
-        user = _role_user(
+        user = self._user(
             f'an_grv_full_{self.marker}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ]
         )
         self.assertEqual(self._count_by_category(user), {'public': 2, 'secret': 1})
 
     def test_restricted_reader_counts_on_visible_fields(self):
-        user = _role_user(
+        user = self._user(
             f'an_grv_restr_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ, HIDDEN_FLAG_RESTRICTED_READ]
         )
         # The flagged public ticket shows only the basic fields; the channel
@@ -89,7 +105,7 @@ class GrievanceScopeTest(GrievanceFixture):
         self.assertEqual(self._count_by_category(user), {'public': 1, 'secret': 1})
 
     def test_restricted_reader_gets_no_hidden_columns(self):
-        user = _role_user(
+        user = self._user(
             f'an_grv_rows_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ, HIDDEN_FLAG_RESTRICTED_READ]
         )
         rows = _run('grievance', self._config(), user).rows
@@ -98,11 +114,11 @@ class GrievanceScopeTest(GrievanceFixture):
         self.assertEqual(grouped_by_title, [{'title': 'public title'}])
 
     def test_user_without_category_access_does_not_see_it(self):
-        user = _role_user(f'an_grv_nocat_{self.marker}', [QUERY, TICKET_READ])
+        user = self._user(f'an_grv_nocat_{self.marker}', [QUERY, TICKET_READ])
         self.assertEqual(self._count_by_category(user), {'public': 1})
 
     def test_export_path_applies_the_same_scope(self):
-        user = _role_user(f'an_grv_exp_{self.marker}', [QUERY, TICKET_READ])
+        user = self._user(f'an_grv_exp_{self.marker}', [QUERY, TICKET_READ])
         with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
             result = QueryBuilderService.execute_query('grievance', self._config(fields=['title']), user, max_rows=10)
         self.assertEqual(result.rows, [{'title': 'public title'}])
@@ -113,7 +129,7 @@ class WithheldRestrictedTicketsTest(GrievanceFixture):
     the result says so instead of looking like an empty match."""
 
     def _restricted_user(self, rights=(SECRET_RESTRICTED_READ, HIDDEN_FLAG_RESTRICTED_READ)):
-        return _role_user(f'an_grv_wh_{_marker()}', [QUERY, TICKET_READ, *rights])
+        return self._user(f'an_grv_wh_{_marker()}', [QUERY, TICKET_READ, *rights])
 
     def test_ungrouped_query_on_a_restricted_category_reports_the_withheld_tickets(self):
         result = _run('grievance', self._config(
@@ -182,7 +198,7 @@ class WithheldRestrictedTicketsTest(GrievanceFixture):
         self.assertTrue(matching[1])
 
     def test_tickets_the_user_cannot_see_are_not_reported(self):
-        user = _role_user(f'an_grv_wh_none_{_marker()}', [QUERY, TICKET_READ])
+        user = self._user(f'an_grv_wh_none_{_marker()}', [QUERY, TICKET_READ])
         result = _run('grievance', self._config(
             filters={
                 'channel': {'operator': 'exact', 'value': self.marker},
@@ -193,7 +209,7 @@ class WithheldRestrictedTicketsTest(GrievanceFixture):
         self.assertFalse(result.restricted_rows_withheld)
 
     def test_full_reader_has_nothing_withheld(self):
-        user = _role_user(f'an_grv_wh_full_{_marker()}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
+        user = self._user(f'an_grv_wh_full_{_marker()}', [QUERY, TICKET_READ, SECRET_READ, HIDDEN_FLAG_READ])
         result = _run('grievance', self._config(), user)
         self.assertEqual(len(result.rows), 3)
         self.assertFalse(result.restricted_rows_withheld)
@@ -210,7 +226,7 @@ class FlagRestrictedTicketFieldsTest(GrievanceFixture):
     def setUp(self):
         super().setUp()
         Ticket.objects.filter(channel=self.marker).update(status=self.marker)
-        self.restricted_user = _role_user(
+        self.restricted_user = self._user(
             f'an_grv_flag_{self.marker}', [QUERY, TICKET_READ, SECRET_RESTRICTED_READ, HIDDEN_FLAG_RESTRICTED_READ]
         )
 
