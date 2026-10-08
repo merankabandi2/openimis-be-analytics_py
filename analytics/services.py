@@ -143,7 +143,10 @@ class QueryBuilderService:
         config_digest = hashlib.sha256(
             json.dumps(query_config, sort_keys=True, default=str).encode()
         ).hexdigest()
-        cache_key = f"analytics_query_{getattr(user, 'id', None)}_{entity_type}_{max_rows}_{config_digest}"
+        access_digest = cls._access_digest(entity_type, user)
+        cache_key = (
+            f"analytics_query_{getattr(user, 'id', None)}_{entity_type}_{max_rows}_{config_digest}_{access_digest}"
+        )
         cached_result = cache.get(cache_key)
         if cached_result is not None:
             return QueryResult(*cached_result)
@@ -158,6 +161,30 @@ class QueryBuilderService:
 
         cache.set(cache_key, tuple(result), AnalyticsConfig.analytics_cache_ttl)
         return result
+
+    @classmethod
+    def _access_digest(cls, entity_type, user):
+        """SHA-256 of what decides, besides the query config, the rows and fields
+        `user` reads on `entity_type`: superuser status, rights, the locations
+        row security admits, the analytics field allowlist and, for grievances,
+        the grievance module configuration. A result cached under one state is
+        not served under another."""
+        from analytics.apps import AnalyticsConfig
+        state = {
+            'superuser': bool(user.is_superuser),
+            'rights': sorted(str(right) for right in (getattr(user, 'rights', None) or [])),
+            'allowlist': AnalyticsConfig.analytics_field_allowlist,
+        }
+        if cls._row_security_applies(user):
+            from core.models import InteractiveUser
+            from location.models import LocationManager
+            core_user = getattr(user, '_u', user)
+            if isinstance(core_user, InteractiveUser):
+                state['locations'] = sorted(LocationManager().get_allowed_ids(core_user))
+        if entity_type == 'grievance':
+            from analytics import grievance_access
+            state['grievance'] = grievance_access.configuration()
+        return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
 
     @classmethod
     def get_entity_fields(cls, entity_type: str, user) -> List[Dict]:
