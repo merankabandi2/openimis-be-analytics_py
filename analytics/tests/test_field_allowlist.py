@@ -18,7 +18,7 @@ from payroll.models import BenefitConsumption
 from analytics.apps import AnalyticsConfig
 from analytics.models import AnalyticsDashboard, AnalyticsExport, AnalyticsQuery, AnalyticsWidget
 from analytics.schema import ExportAnalyticsDataMutation, Query
-from analytics.services import QueryBuilderService
+from analytics.services import RELATION_PATHS, QueryBuilderService
 from analytics.tests.test_permissions import _info
 from analytics.tests.test_query_builder import _marker, _role_user, _run
 
@@ -205,6 +205,79 @@ class EntityFieldListTest(TestCase):
                            return_value=listed):
             names = {field['name'] for field in QueryBuilderService.get_entity_fields('payment', self.user)}
         self.assertEqual(names, {'status', 'amount'})
+
+
+def _path(name, label):
+    return {'name': name, 'type': 'CharField', 'label': label, 'filterable': True, 'aggregatable': False}
+
+
+LOCATION_PATHS = [
+    _path('location__name', 'Colline'),
+    _path('location__parent__name', 'Commune'),
+    _path('location__parent__parent__name', 'Province'),
+]
+
+# Relation paths each entity offers in its field list, in display order.
+RELATION_PATH_FIELDS = {
+    'group_beneficiary': [
+        _path('benefit_plan__code', 'Programme (code)'),
+        _path('benefit_plan__name', 'Programme (nom)'),
+        _path('group__location__name', 'Colline du ménage'),
+        _path('group__location__parent__name', 'Commune du ménage'),
+        _path('group__location__parent__parent__name', 'Province du ménage'),
+    ],
+    'group': LOCATION_PATHS,
+    'individual': LOCATION_PATHS,
+    'beneficiary': [],
+    'payment': [],
+    'grievance': [],
+}
+
+
+class RelationPathFieldListTest(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.admin = create_test_interactive_user(username='analytics_qb_admin')
+        self.user = _role_user(f'an_paths_{_marker()}', [QUERY])
+
+    def _relation_fields(self, entity_type, user):
+        with mock.patch.object(QueryBuilderService, '_use_opensearch', return_value=False):
+            fields = QueryBuilderService.get_entity_fields(entity_type, user)
+        return [field for field in fields if '__' in field['name']]
+
+    def test_every_accepted_relation_path_is_offered_to_a_superuser(self):
+        for entity_type in QueryBuilderService.ENTITY_TYPES:
+            with self.subTest(entity=entity_type):
+                names = {field['name'] for field in self._relation_fields(entity_type, self.admin)}
+                self.assertEqual(names, RELATION_PATHS.get(entity_type, set()))
+
+    def test_programme_and_location_paths_are_offered_to_a_non_superuser(self):
+        for entity_type, expected in RELATION_PATH_FIELDS.items():
+            with self.subTest(entity=entity_type):
+                self.assertEqual(self._relation_fields(entity_type, self.user), expected)
+
+    def test_programme_and_location_paths_are_offered_to_a_superuser(self):
+        for entity_type, expected in RELATION_PATH_FIELDS.items():
+            with self.subTest(entity=entity_type):
+                self.assertEqual(self._relation_fields(entity_type, self.admin), expected)
+
+    def test_path_left_out_of_the_configured_allowlist_is_not_offered(self):
+        allowlist = {'group_beneficiary': ['id', 'benefit_plan__name', 'group__location__parent__parent__name']}
+        with mock.patch.object(AnalyticsConfig, 'analytics_field_allowlist', allowlist):
+            names = [field['name'] for field in self._relation_fields('group_beneficiary', self.user)]
+        self.assertEqual(names, ['benefit_plan__name', 'group__location__parent__parent__name'])
+
+    def test_every_offered_path_runs_for_a_non_superuser(self):
+        for entity_type in ('group_beneficiary', 'group', 'individual'):
+            offered = [field['name'] for field in self._relation_fields(entity_type, self.user)]
+            self.assertEqual(offered, [field['name'] for field in RELATION_PATH_FIELDS[entity_type]])
+            for path in offered:
+                with self.subTest(entity=entity_type, path=path):
+                    _run(entity_type, {
+                        'filters': {path: {'operator': 'is_not_null'}},
+                        'group_by': [path], 'aggregations': {'n': {'function': 'count', 'field': 'id'}},
+                    }, self.user)
+                    _run(entity_type, {'fields': [path], 'limit': 1}, self.user)
 
 
 class ConfiguredAllowlistTest(TestCase):

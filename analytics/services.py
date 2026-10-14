@@ -114,6 +114,19 @@ RELATION_PATHS = {
     },
 }
 
+# Labels of the relation paths in the field list, in display order. A location
+# is a colline; its parent is the commune and its grandparent the province.
+RELATION_PATH_LABELS = {
+    'benefit_plan__code': 'Programme (code)',
+    'benefit_plan__name': 'Programme (nom)',
+    'location__name': 'Colline',
+    'location__parent__name': 'Commune',
+    'location__parent__parent__name': 'Province',
+    'group__location__name': 'Colline du ménage',
+    'group__location__parent__name': 'Commune du ménage',
+    'group__location__parent__parent__name': 'Province du ménage',
+}
+
 
 class QueryBuilderService:
     """
@@ -674,6 +687,8 @@ class QueryBuilderService:
 
     @classmethod
     def _get_orm_entity_fields(cls, entity_type: str) -> List[Dict]:
+        """The entity's concrete fields, then its RELATION_PATHS in the order
+        of RELATION_PATH_LABELS."""
         model = cls._get_orm_model(entity_type)
         if not model:
             return []
@@ -688,6 +703,16 @@ class QueryBuilderService:
                     'aggregatable': field.get_internal_type() in (
                         'IntegerField', 'DecimalField', 'FloatField',
                     ),
+                })
+        paths = RELATION_PATHS.get(entity_type, set())
+        for path, label in RELATION_PATH_LABELS.items():
+            if path in paths:
+                fields.append({
+                    'name': path,
+                    'type': cls._resolve_field(model, path).get_internal_type(),
+                    'label': label,
+                    'filterable': True,
+                    'aggregatable': False,
                 })
         return fields
 
